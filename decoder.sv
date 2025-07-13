@@ -24,7 +24,8 @@ module decoder (
     output logic completion_bit,      // 完成位，表示指令是否可以直接完成(一些指令不需要等待，发射之后直接标记完成即可)
     output logic [1:0] issue_distr_direction, // 指令发射方向，分成00 -- simple_IQ, 01 -- complex_IQ, 10 -- LSU_IQ
     output logic B_exist, // 表示这一条指令是B指令，即直接跳转指令
-    output logic [31:0] B_jump_offset // 表示B指令的跳转偏移量
+    output logic [31:0] B_jump_offset, // 表示B指令的跳转偏移量
+    output logic branch_exist // 表示这一条指令是分支指令
 );
 
 // Internal signals for individual decoders
@@ -111,6 +112,7 @@ always_comb begin
     imm_sign_extend = 1'b0; // 默认零拓展
     B_exist = 1'b0; // 默认不是B指令
     B_jump_offset = 26'b0; // 默认B指令的跳转偏移量为0
+    branch_exist = 1'b0; // 默认不是分支指令
 
     // Create one-hot instruction type vector for parallel decoding
     // Each bit represents a valid instruction type (only one can be 1)
@@ -258,6 +260,7 @@ always_comb begin
             reg_rj_exist = 1'b1;
             reg_rk_exist = 1'b0;
             imm_enable = 1'b1;  // BJ instructions use immediate
+            branch_exist = 1'b1;
             // Extract immediate and adjust register existence based on BJ instruction type
             case(bj_op_type)
                 // B and BL instructions: no registers, 26-bit immediate
@@ -483,6 +486,7 @@ always_comb begin
             issue_distr_direction = 2'b00;
             B_exist = 1'b0;
             B_jump_offset = 26'b0;
+            branch_exist = 1'b0;
         end
     endcase
 end

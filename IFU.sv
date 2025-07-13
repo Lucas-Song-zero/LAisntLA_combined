@@ -8,13 +8,17 @@ module IFU(
 
     input logic [31:0] fetch_pc,
     input logic [1:0] cut_pos,
+    input logic pred_taken_in,
+    input logic [31:0] pred_jump_target_pc_in,
     input logic input_valid,
     input logic icache_ready, // Icache准备好取指
     output logic ifu_ready, // IFU准备好接收inserting取指请求
 
     output logic [31:0] fetch_pc_out,
     output logic [1:0] cut_pos_out, // 00 -- 取四条指令, 01 -- 取一条指令, 10 -- 取两条指令, 11 -- 取三条指令
-    output logic fetch_req_valid,
+    output logic pred_taken_out, // 预测是否跳转
+    output logic [31:0] pred_jump_target_pc_out, // 预测的跳转目标PC
+    output logic ifu_valid,
     
 );
 

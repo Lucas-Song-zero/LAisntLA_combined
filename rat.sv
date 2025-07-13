@@ -53,10 +53,11 @@ logic [`PREG_INDEX_WIDTH-1:0] rat [31:0];
 
 // read rat
 always_comb begin
-    rd_history_preg_0 = arch_rd_exist_vec[0] ? rat[arch_rd_0_index] : 0;
-    rd_history_preg_1 = arch_rd_exist_vec[1] ? rat[arch_rd_1_index] : 0;
-    rd_history_preg_2 = arch_rd_exist_vec[2] ? rat[arch_rd_2_index] : 0;
-    rd_history_preg_3 = arch_rd_exist_vec[3] ? rat[arch_rd_3_index] : 0;
+    // arch rd=0始终映射到preg 0
+    rd_history_preg_0 = arch_rd_exist_vec[0] ? ((arch_rd_0_index == 5'h0) ? 7'h0 : rat[arch_rd_0_index]) : 0;
+    rd_history_preg_1 = arch_rd_exist_vec[1] ? ((arch_rd_1_index == 5'h0) ? 7'h0 : rat[arch_rd_1_index]) : 0;
+    rd_history_preg_2 = arch_rd_exist_vec[2] ? ((arch_rd_2_index == 5'h0) ? 7'h0 : rat[arch_rd_2_index]) : 0;
+    rd_history_preg_3 = arch_rd_exist_vec[3] ? ((arch_rd_3_index == 5'h0) ? 7'h0 : rat[arch_rd_3_index]) : 0;
 
     rj_matched_preg_0 = arch_rj_exist_vec[0] ? rat[arch_rj_0_index] : 0;
     rj_matched_preg_1 = arch_rj_exist_vec[1] ? rat[arch_rj_1_index] : 0;
@@ -82,10 +83,11 @@ always_ff @(posedge clk or negedge rst_n) begin
         end
     end
     else begin
-        rat[arch_rd_0_index] <= (updating_valid_vec[0] && arch_rd_exist_vec[0]) ? added_preg_index_vec[0] : rat[arch_rd_0_index];
-        rat[arch_rd_1_index] <= (updating_valid_vec[1] && arch_rd_exist_vec[1]) ? added_preg_index_vec[1] : rat[arch_rd_1_index];
-        rat[arch_rd_2_index] <= (updating_valid_vec[2] && arch_rd_exist_vec[2]) ? added_preg_index_vec[2] : rat[arch_rd_2_index];
-        rat[arch_rd_3_index] <= (updating_valid_vec[3] && arch_rd_exist_vec[3]) ? added_preg_index_vec[3] : rat[arch_rd_3_index];
+        // arch rd=0始终映射到preg 0，不更新RAT表
+        rat[arch_rd_0_index] <= (updating_valid_vec[0] && arch_rd_exist_vec[0] && arch_rd_0_index != 5'h0) ? added_preg_index_vec[0] : rat[arch_rd_0_index];
+        rat[arch_rd_1_index] <= (updating_valid_vec[1] && arch_rd_exist_vec[1] && arch_rd_1_index != 5'h0) ? added_preg_index_vec[1] : rat[arch_rd_1_index];
+        rat[arch_rd_2_index] <= (updating_valid_vec[2] && arch_rd_exist_vec[2] && arch_rd_2_index != 5'h0) ? added_preg_index_vec[2] : rat[arch_rd_2_index];
+        rat[arch_rd_3_index] <= (updating_valid_vec[3] && arch_rd_exist_vec[3] && arch_rd_3_index != 5'h0) ? added_preg_index_vec[3] : rat[arch_rd_3_index];
     end
 end
 

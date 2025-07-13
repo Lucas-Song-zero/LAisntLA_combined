@@ -12,6 +12,14 @@ logic [3:0] bar_type_vec [1:0] 是2个4bit数组
 
 # 需要再给CSR unit留一个buffer用于存放其imm值
 
-# hit类的CACOP到底能否提前执行是一个问题，RDCNT是否需要保证顺序执行（感觉也要，但是目前先这样写着？x，RDCNT提前执行如果不报错的话会导致性能虚高？）
+# hit类的CACOP到底能否提前执行是一个问题，RDCNT是否需要保证顺序执行（感觉也要
+但是目前先这样写着？x，RDCNT提前执行如果不报错的话会导致性能虚高？）
 
+# IFU要增加指令缓存功能
 
+# 现在在写rename，RAT和freelist关于rd0的规范需要注意一下
+arch_rd_0永远都只能映射到PRF preg_0
+
+# FU写回忙表的端口好像还没给？可能需要增加一下
+
+# 

@@ -122,9 +122,10 @@ logic stall_ifu;
 logic ifu_ready;
 
 logic icache_ready;
-logic [31:0] fetch_pc_out;
-logic [1:0] cut_pos_out;
-logic fetch_req_valid;
+logic [31:0] fetch_pc_ifu_out;
+logic [1:0] cut_pos_ifu_out;
+logic pred_taken_ifu_out;
+logic [31:0] pred_jump_target_pc_ifu_out;
 
 IFU ifu(
     .clk(aclk),
@@ -134,41 +135,45 @@ IFU ifu(
 
     .fetch_pc(pc_reg),
     .cut_pos(cut_pos_wire),
+    .pred_taken_in(taken_wire),
+    .pred_jump_target_pc_in(pc_next_wire),
+
     .input_valid(1'b1), // 因为还有ifu_ready来防止重复塞入取指请求，所以这里可以直接置1
     // 这主要是因为前面我们认为BPU是连续输出的，中间没有无效值
     .icache_ready(icache_ready),
     .ifu_ready(ifu_ready),
 
-    .fetch_pc_out(fetch_pc_out),
-    .cut_pos_out(cut_pos_out),
-    .fetch_req_valid(fetch_req_valid)
+    .fetch_pc_out(fetch_pc_ifu_out),
+    .cut_pos_out(cut_pos_ifu_out),
+    .pred_taken_out(pred_taken_ifu_out),
+    .pred_jump_target_pc_out(pred_jump_target_pc_ifu_out),
+    .ifu_valid(ifu_valid)
 );
 // IFU 要连接到icache上
 
 // 这里可以放一个icache top实例
-logic icache_resp_valid; // icache响应有效(至少有一条指令取出了)
+logic ifu_valid; // ifu取指回来了，可以输出给decoder
 logic [31:0] fetched_instr [3:0]; // 一次最多取四条指令
 logic [1:0] icache_resp_instr_num; // 一次取指的指令数量
 logic [3:0] fetch_valid; // 一次取指的指令四条中哪几条是有效的,应该一定是连续的1
-always_comb begin
-    case (icache_resp_instr_num)
-        2'b00: fetch_valid = 4'b0001; // 第一位是1，其他位是0
-        2'b01: fetch_valid = 4'b0011;
-        2'b10: fetch_valid = 4'b0111;
-        2'b11: fetch_valid = 4'b1111;
-    endcase
-end
+// fetch_valid 是由 cut_pos决定的，每次icache都会取4条指令回来
 // icache_top ...
 
 // 然后是decoder
 decoded_instr_t decoded_instr_out [3:0];
 logic decoder_ready;
-
+logic [31:0] start_pc_decoder_out;
+logic pred_wrong_decoder_out;
+logic [1:0] real_cut_pos_decoder_out;
+logic [31:0] real_jump_target_pc_decoder_out;
+logic pred_taken_decoder_out;
+logic [1:0] pred_cut_pos_decoder_out;
+logic [31:0] pred_next_fetch_targer_pc_decoder_out;
 
 decoder_stage decoder(
     .clk(aclk),
     .rst_n(rst_n),
-    .ifu_valid(icache_resp_valid),
+    .ifu_valid(ifu_valid),
     .flush(decoder_flush), // 只需要flush output就行
 
     .instr_0(fetched_instr[0]),
@@ -178,12 +183,109 @@ decoder_stage decoder(
     .fetch_valid(fetch_valid),
     .decoder_ready(decoder_ready), // decoder_ready == rename_ready
 
+    .start_pc_in(fetch_pc_ifu_out),
+    .start_pc_out(start_pc_decoder_out),
+    .pred_taken(pred_taken_ifu_out),
+    .pred_taken_decoder_out(pred_taken_decoder_out),
+    .pred_cut_pos(cut_pos_ifu_out),
+    .pred_cut_pos_out(pred_cut_pos_decoder_out),
+    .pred_next_fetch_target_pc(pred_jump_target_pc_ifu_out),
+    .pred_next_fetch_targer_pc_out(pred_next_fetch_targer_pc_decoder_out),
+    .pred_wrong(pred_wrong_decoder_out),
+    .real_cut_pos_out(real_cut_pos_decoder_out),
+    .real_jump_target_pc(real_jump_target_pc_decoder_out),
+    
     .decoded_instr(decoded_instr_out),
-    .rename_ready(rename_ready)
+    .decoded_instr_valid(decoded_instr_valid_out_vec),
+    .decoder_valid(decoder_valid),
+    .rename_ready(rename_ready),
+    .rename_rd_request(rename_rd_request_decoder_out)
 );
 
 logic rename_ready;
-logic 
-// 
+logic decoder_valid;
+logic [3:0] decoded_instr_valid_out_vec;
+logic [2:0] rename_rd_request_decoder_out;
+
+// 然后是rename
+logic rename_flush;
+logic [1:0] pred_cut_pos_decoder_out_minus_1; // 预测的cut_pos - 1
+assign pred_cut_pos_decoder_out_minus_1 = pred_cut_pos_decoder_out - 2'b1;
+
+rename_input_t rename_input_vec [3:0];
+always_comb begin
+    for(int i=0; i<4; i=i+1) begin
+        rename_input_vec[i].valid = decoded_instr_valid_out_vec[i];
+        rename_input_vec[i].gen_op_type = decoded_instr_out[i].gen_op_type;
+        rename_input_vec[i].spec_op_type = decoded_instr_out[i].spec_op_type;
+        rename_input_vec[i].exception = decoded_instr_out[i].exception;
+        rename_input_vec[i].imm = decoded_instr_out[i].imm;
+        rename_input_vec[i].imm_enable = decoded_instr_out[i].imm_enable;
+        rename_input_vec[i].imm_sign_extend = decoded_instr_out[i].imm_sign_extend;
+        rename_input_vec[i].reg_rd = decoded_instr_out[i].reg_rd;
+        rename_input_vec[i].reg_rd_exist = decoded_instr_out[i].reg_rd_exist;
+        rename_input_vec[i].reg_rj = decoded_instr_out[i].reg_rj;
+        rename_input_vec[i].reg_rj_exist = decoded_instr_out[i].reg_rj_exist;
+        rename_input_vec[i].reg_rk = decoded_instr_out[i].reg_rk;
+        rename_input_vec[i].reg_rk_exist = decoded_instr_out[i].reg_rk_exist;
+        rename_input_vec[i].store_or_load = decoded_instr_out[i].store_or_load;
+        rename_input_vec[i].bar_type = decoded_instr_out[i].bar_type;
+        rename_input_vec[i].bar_type = decoded_instr_out[i].bar_type;
+        rename_input_vec[i].completion_bit = decoded_instr_out[i].completion_bit;
+        rename_input_vec[i].issue_distr_direction = decoded_instr_out[i].issue_distr_direction;
+        // 开始记性pred_jump_target_pc的计算
+        // 这里我们假设分支预测在简单判断下是正确的
+        if(pred_taken_decoder_out) begin
+            // 预测跳转
+            if(i == pred_cut_pos_decoder_out_minus_1) begin
+                rename_input_vec[i].pred_jump_target_pc = pred_next_fetch_targer_pc_decoder_out;
+            end else begin
+                rename_input_vec[i].pred_jump_target_pc = start_pc_decoder_out + 4 * i + 4;
+            end
+        end else begin
+            rename_input_vec[i].pred_jump_target_pc = start_pc_decoder_out + 4 * i + 4;
+        end
+    end
+end
+
+
+rename rename(
+    .clk(aclk),
+    .rst_n(rst_n),
+    .decoder_valid(decoder_valid),
+    .rename_flush(rename_flush),
+    .issue_ready(issue_ready),
+    .rob_index_start(rob_alloc_index_start), // ROB能给rename输出的指令分配的index的开始的index
+    .rob_index_num_req(rob_index_num_req_rename_out), // 需要rename分配的index数量
+    .rob_ready(rob_ready), // ROB是否准备好接收指令
+    .rename_ready(rename_ready_out),
+    .rename_valid(rename_valid_out),
+
+    // 如果分支预测失败等情况出现，就需要recover
+    .recover_valid(),
+    .recover_preg_index_vec(), // 使用aRAT恢复RAT
+    // 可能还有freelist比如，但是现在先不考虑这么多
+
+    // 退休指令把rd history写回
+    .retire_write_back_valid(), // 退休指令把rd history写回
+    .freed_preg_valid_vec(), // 写回的rd history preg index是否有效
+    .freed_preg_index_0(),
+    .freed_preg_index_1(),
+    .freed_preg_index_2(),
+    .freed_preg_index_3(), // 写回的最多四个freed preg index
+    
+    // rename输入结构体数组
+    .rename_input_vec(rename_input_vec), // 基本上是decoder的输出
+    .start_pc_in(start_pc_decoder_out), // 取指开始的pc
+
+    .rename_output_vec(rename_output_vec) // rename之后的输出结构体
+)
+
+rename_output_t rename_output_vec [3:0];
+logic dispatch_ready;
+logic issue_ready;
+logic [`ROB_ENTRY_INDEX_WIDTH-1:0] rob_alloc_index_start;
+logic [2:0] rob_index_num_req_rename_out;
+logic [2:0] rename_rd_request_out; 
 
 endmodule

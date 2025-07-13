@@ -178,8 +178,9 @@ typedef struct packed {
     logic valid;                 // 有效信号
     logic [`ROB_MAINBODY_ENTRY_exception_width-1:0] exception; // 异常信号
     logic store_or_load;         // 是否是store或load指令
-    logic [2:0] bar_type;        // 屏障类型 00 - normal , 01 - DBAR , 10 - IBAR
+    logic [1:0] bar_type;        // 屏障类型 00 - normal , 01 - DBAR , 10 - IBAR
     logic completion_bit;        // 一些指令需要保证发射即完成，比如PRELD等
+    logic [1:0] issue_distr_direction; // 00 - simple_IQ ; 01 - complex_IQ ; 10 - LSU_IQ ; 11 - ROB
 } decoded_instr_t; 
 
 /////////////////////////////////////////////
@@ -192,6 +193,57 @@ rename 进行对架构寄存器的重命名，renamed成物理寄存器号
 `define PRF_NUM 128
 `define PREG_INDEX_WIDTH 7  // log2(128) = 7
 `define RAT_ENTRY_WIDTH 7   // log2(128) = 7
+
+// rename输入结构体定义
+typedef struct packed {
+    logic [3:0] gen_op_type;            // 指令通用操作类型
+    logic [4:0] spec_op_type;           // 指令特定操作类型
+    logic [`ROB_MAINBODY_ENTRY_exception_width-1:0] exception; // 异常信号类型
+    logic [25:0] imm;                   // 指令立即数
+    logic imm_enable;                   // 指令立即数使能
+    logic imm_sign_extend;              // 指令立即数符号扩展
+    logic valid;                        // 指令有效
+    logic [4:0] reg_rd;                 // rd架构寄存器索引
+    logic reg_rd_exist;                 // rd存在
+    
+    logic [4:0] reg_rj;                 // rj架构寄存器索引
+    logic reg_rj_exist;                 // rj存在
+    logic [4:0] reg_rk;                 // rk架构寄存器索引
+    logic reg_rk_exist;                 // rk存在
+    logic store_or_load;                // 是否是store或load指令
+    logic [1:0] bar_type;               // 屏障类型 00 - normal , 01 - DBAR , 10 - IBAR
+    logic completion_bit;               // 一些指令需要保证发射即完成，比如PRELD等
+    logic [1:0] issue_distr_direction;  // 00 - simple_IQ ; 01 - complex_IQ ; 10 - LSU_IQ ; 11 - ROB
+    logic [31:0] pred_jump_target_pc;   // 预测的跳转目标PC
+} rename_input_t;
+
+// rename输出结构体定义
+typedef struct packed {
+    logic [31:0] pc;                    // 指令PC
+    logic valid;                        // 指令有效
+    logic [3:0] gen_op_type;
+    logic [4:0] spec_op_type;
+    logic [`ROB_MAINBODY_ENTRY_exception_width-1:0] exception; // 异常信号类型
+    logic [25:0] imm;                   // 指令立即数
+    logic imm_enable;                   // 指令立即数使能
+    logic imm_sign_extend;              // 指令立即数符号扩展
+    logic [4:0] rd_arch_index;          // rd架构寄存器索引
+    logic rd_exist;                     // rd存在
+    logic preg_rd_ready;                // rd物理寄存器 value ready
+    logic [`PREG_INDEX_WIDTH-1:0] preg_rd;  // rd物理寄存器索引
+    logic [`PREG_INDEX_WIDTH-1:0] preg_rj;  // rj物理寄存器索引
+    logic rj_exist;                     // rj存在
+    logic preg_rj_ready;                // rj物理寄存器 value ready
+    logic [`PREG_INDEX_WIDTH-1:0] preg_rk;  // rk物理寄存器索引
+    logic rk_exist;                     // rk存在
+    logic preg_rk_ready;                // rk物理寄存器 value ready
+    logic [`PREG_INDEX_WIDTH-1:0] rd_history_preg;  // rd历史物理寄存器索引
+    logic [31:0] pred_jump_target_pc; // 预测的跳转目标pc(针对这条指令来说的)
+    logic [1:0] issue_distr_direction; // 00 - simple_IQ ; 01 - complex_IQ ; 10 - LSU_IQ ; 11 - ROB
+    logic store_or_load;                // 是否是store或load指令
+    logic [1:0] bar_type;               // 屏障类型 00 - normal , 01 - DBAR , 10 - IBAR
+    logic completion_bit;               // 一些指令需要保证发射即完成，比如PRELD等
+} rename_output_t;
 
 /////////////////////////////////////////////
 ////////////////////////////////////////////
