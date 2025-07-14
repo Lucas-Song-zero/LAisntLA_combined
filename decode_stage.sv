@@ -231,6 +231,7 @@ always_ff @(posedge clk or negedge rst_n) begin
     end else begin
         // Process new instructions when enabled and ready
         if (ifu_valid && decoder_ready && rename_ready) begin
+            // 实际上现在decoder_ready就是rename_ready
             // Process each instruction slot independently
             for (int i = 0; i < 4; i = i + 1) begin
                 // Only process if fetch has valid instruction and decoder slot is not busy

@@ -278,14 +278,242 @@ rename rename(
     .rename_input_vec(rename_input_vec), // 基本上是decoder的输出
     .start_pc_in(start_pc_decoder_out), // 取指开始的pc
 
-    .rename_output_vec(rename_output_vec) // rename之后的输出结构体
-)
+    .rename_output_vec(rename_output_vec), // rename之后的输出结构体
+    // 和忙表的交互
+    .begin_exec_rd_index_vec(),
+    .begin_exec_valid_vec(),
+    .wb_rd_index_vec(),
+    .wb_valid_vec()
+);
 
 rename_output_t rename_output_vec [3:0];
 logic dispatch_ready;
 logic issue_ready;
 logic [`ROB_ENTRY_INDEX_WIDTH-1:0] rob_alloc_index_start;
 logic [2:0] rob_index_num_req_rename_out;
-logic [2:0] rename_rd_request_out; 
+logic [2:0] rename_rd_request_out;
+
+// 这里需要增加一个根据renamed之后的指令的 issue_direction 来每个IQ需要分配的空位数量的逻辑
+logic [2:0] simple_iq_0_input_instr_num;
+logic [2:0] simple_iq_1_input_instr_num;
+logic [2:0] complex_iq_input_instr_num;
+logic [2:0] lsu_iq_input_instr_num;
+// 如果可以会尽可能给一个IQ分配满4个指令，因为这样可以增加内部pre-wakeup的概率（大概可以）
+// 如果没有分配，则对应的 issue_valid也要置0
+
+logic [2:0] simple_iq_0_left_entry_cnt;
+logic [2:0] simple_iq_1_left_entry_cnt;
+logic [2:0] complex_iq_left_entry_cnt;
+logic [2:0] lsu_iq_left_entry_cnt;
+
+// 以及要增加分配 alloc到的rob_entry_vec给每个IQ的逻辑
+logic [`ROB_ENTRY_INDEX_WIDTH-1:0] simple_iq_0_rob_entry_vec [3:0];
+logic [`ROB_ENTRY_INDEX_WIDTH-1:0] simple_iq_1_rob_entry_vec [3:0];
+logic [`ROB_ENTRY_INDEX_WIDTH-1:0] complex_iq_rob_entry_vec [3:0];
+logic [`ROB_ENTRY_INDEX_WIDTH-1:0] lsu_iq_rob_entry_vec [3:0];
+
+// IQ输入输出的结构体
+// 输入
+simple_single_instr_info_t simple_iq_0_instr_info;
+simple_single_instr_info_t simple_iq_1_instr_info;
+complex_single_instr_info_t complex_iq_instr_info;
+lsu_single_instr_info_t lsu_iq_instr_info;
+// 输出
+simple_issue_queue_issued_info_t simple_iq_0_issued_info;
+simple_issue_queue_issued_info_t simple_iq_1_issued_info;
+complex_issue_queue_issued_info_t complex_iq_issued_info;
+lsu_issue_queue_issued_info_t lsu_iq_issued_info;
+
+simple_issue_queue simple_issue_queue_0(
+    .clk(aclk),
+    .rst_n(rst_n),
+    .rename_valid(rename_valid_out),
+    .fu_ready(simple_fu_0_ready),
+    .rename_instr_num(simple_iq_0_input_instr_num),
+    .left_IQ_entry_cnt(simple_iq_0_left_entry_cnt),
+    .issue_ready(simple_iq_0_ready),
+    .issue_valid(simple_iq_0_issue_valid),
+
+    .instr_info(), // 输入指令信息结构体数组
+
+    .write_back_rd_exist_vec(),
+    .write_back_rd_index(),
+
+    .issued_info(simple_iq_0_issued_info)
+);
+
+simple_issue_queue simple_issue_queue_1(
+    .clk(aclk),
+    .rst_n(rst_n),
+    .rename_valid(rename_valid_out),
+    .fu_ready(simple_fu_1_ready),
+    .rename_instr_num(simple_iq_1_input_instr_num),
+    .left_IQ_entry_cnt(simple_iq_1_left_entry_cnt),
+    .issue_ready(simple_iq_1_ready),
+    .issue_valid(simple_iq_1_issue_valid),
+
+    .instr_info(), // 输入指令信息结构体数组
+
+    .write_back_rd_exist_vec(),
+    .write_back_rd_index_vec(),
+
+    .issued_info(simple_iq_1_issued_info)
+);
+
+complex_issue_queue complex_issue_queue(
+    .clk(aclk),
+    .rst_n(rst_n),
+    .rename_valid(rename_valid_out),
+    .fu_ready(complex_fu_ready),
+    .rename_instr_num(complex_iq_input_instr_num),
+    .left_IQ_entry_cnt(complex_iq_left_entry_cnt),
+    .issue_ready(complex_iq_ready),
+    .issue_valid(complex_iq_issue_valid),
+
+    .instr_info(), // 输入指令信息结构体数组
+
+    .write_back_rd_exist_vec(),
+    .write_back_rd_index_vec(),
+
+    .issued_info(complex_iq_issued_info)
+);
+
+LSU_issue_queue LSU_issue_queue(
+    .clk(aclk),
+    .rst_n(rst_n),
+    .rename_valid(rename_valid_out),
+    .fu_ready(lsu_fu_ready),
+    .rename_instr_num(lsu_iq_input_instr_num),
+    .left_IQ_entry_cnt(lsu_iq_left_entry_cnt),
+    .issue_ready(lsu_iq_ready),
+    .issue_valid(lsu_iq_issue_valid),
+
+    .instr_info(), // 输入指令信息结构体数组
+
+    .write_back_rd_exist_vec(),
+    .write_back_rd_index_vec(),
+
+    .issued_info(lsu_iq_issued_info)
+);
+
+logic simple_fu_0_ready;
+logic simple_fu_1_ready;
+logic complex_fu_ready;
+logic lsu_fu_ready;
+
+simple_fu simple_fu_0(
+    .clk(aclk),
+    .rst_n(rst_n),
+    .issue_valid(simple_iq_0_issue_valid),
+    .issued_info(simple_iq_0_issued_info),
+
+    .fu_ready(simple_fu_0_ready),
+    .fu_valid(simple_fu_0_valid),
+
+    .fu_output_info(simple_fu_0_output_info)
+);
+
+simple_fu simple_fu_1(
+    .clk(aclk),
+    .rst_n(rst_n),
+    .issued_info(simple_iq_1_issued_info),
+    .issue_valid(simple_iq_1_issue_valid),
+    .fu_ready(simple_fu_1_ready),
+
+    .prf_read_rj_index(simple_fu_1_output_prf_read_rj_index),
+    .prf_read_rk_index(simple_fu_1_output_prf_read_rk_index),
+
+    .rj_val(simple_fu_1_prf_readback_rj_val),
+    .rk_val(simple_fu_1_prf_readback_rk_val),
+
+    .result(simple_fu_1_result),
+    .wb_rd_index(simple_fu_1_wb_rd_index),
+    .bj_taken(simple_fu_1_bj_taken),
+    .real_cut_pos(simple_fu_1_real_cut_pos),
+    .pred_wrong(simple_fu_1_pred_wrong),
+    .exception(simple_fu_1_exception),
+    .result_valid(simple_fu_1_result_valid),
+    .wb_rob_entry_index(simple_fu_1_wb_rob_entry_index)
+);
+
+complex_fu complex_fu(
+    .clk(aclk),
+    .rst_n(rst_n),
+    .issued_info(complex_iq_issued_info),
+    .issue_valid(complex_iq_issue_valid),
+    .fu_ready(complex_fu_ready),
+
+    .prf_read_rj_index(complex_fu_output_prf_read_rj_index),
+    .prf_read_rk_index(complex_fu_output_prf_read_rk_index),
+
+    .rj_val(complex_fu_prf_readback_rj_val),
+    .rk_val(complex_fu_prf_readback_rk_val),
+
+    .result(complex_fu_result),
+    .wb_rd_index(complex_fu_wb_rd_index),
+    .wb_rob_entry_index(complex_fu_wb_rob_entry_index),
+    .result_valid(complex_fu_result_valid)
+);
+
+LSU lsu(
+    .clk(aclk),
+    .rst_n(rst_n),
+    .issue_valid(lsu_iq_issue_valid),
+    .fu_ready(lsu_fu_ready),
+
+    .prf_read_rj_index(lsu_fu_output_prf_read_rj_index),
+    .prf_read_rk_index(lsu_fu_output_prf_read_rk_index),
+
+    .rj_val(lsu_fu_prf_readback_rj_val),
+    .rk_val(lsu_fu_prf_readback_rk_val),
+
+    .load_data(),
+    .complete_rob_entry_index(),
+    .complete_valid(),
+    .exception(),
+
+    // 这里应该还有一个dcache的有效信号
+    .cache_req(),
+    .cache_resp(),
+
+    // 下面还有一些其他的，和cache的交互
+
+    // 下面是store retire的交互
+    .store_retire_valid(),
+    .write_back_index_to_IQ(),
+    .write_back_index_valid(),
+    // 先这样勉强写着，后面再改....
+);
+
+ROB rob(
+    .clk(aclk),
+    .rst_n(rst_n),
+    .flush(rob_flush),
+    .stall(rob_stall),
+
+    .write_in_num(),
+    .rob_entry_index_start(),
+    .alloc_success(),
+    
+    .rob_instr_info(),
+
+    .complete_entry_index_vec(),
+    .complete_valid_vec(),
+    .fu_exception_vec(),
+    .fu_jump_pc_vec(),
+    .fu_jump_pc_pred_wrong(),
+
+    .store_retire_valid(),
+    .rob_entry_exception(),
+
+    .recover_valid(),
+    .retire_aRAT_write_arch_rd_index_vec(),
+    .recover_aRAT_write_preg_index_vec(),
+
+);
+
+csr csr(
+
+);
 
 endmodule

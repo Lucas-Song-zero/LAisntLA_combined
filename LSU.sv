@@ -5,31 +5,16 @@ module LSU(
     input logic rst_n,
 
     // interface with LSU_IQ
-    input logic IQ_valid, // LSU_IQ output valid signal
-    output logic FU_ready,
-    input logic [3:0] gen_op_type,
-    input logic [4:0] spec_op_type,
-    input logic store_or_load,
-    input logic [1:0] bar_type,
-    input logic imm_enable,
-    input logic [4:0] arch_rd_index,
-    input logic [`PREG_INDEX_WIDTH-1:0] preg_rd_index,
-    input logic [`PREG_INDEX_WIDTH-1:0] preg_rj_index,
-    input logic [`PREG_INDEX_WIDTH-1:0] preg_rk_index,
-    input logic reg_rd_exist,
-    input logic reg_rj_exist,
-    input logic reg_rk_exist,
-    input logic [`LSU_IQ_INDEX_WIDTH-1:0] issued_lsu_index, // for tracking the instr
+    input lsu_issue_queue_issued_info_t issued_info,
+    input logic issue_valid, // LSU_IQ output valid signal
+    output logic fu_ready,
 
     // to read from PRF
-    output logic [`PREG_INDEX_WIDTH-1:0] preg_rj_index_out,
-    output logic [`PREG_INDEX_WIDTH-1:0] preg_rk_index_out,
-    output logic [`PREG_INDEX_WIDTH-1:0] preg_rd_index_out,
+    output logic [`PREG_INDEX_WIDTH-1:0] prf_read_rj_index,
+    output logic [`PREG_INDEX_WIDTH-1:0] prf_read_rd_index,
     // read from PRF or imm
     input logic [31:0] rj_val, // read from PRF using preg_rj_index_out (=preg_rj_index)
-    input logic [31:0] rk_val, // read from PRF using preg_rk_index_out (=preg_rk_index)
     input logic [31:0] rd_val, // read from PRF using preg_rd_index_out (=preg_rd_index)
-    input logic [25:0] imm,
 
     // lsu output
     output logic [31:0] load_data,
@@ -59,7 +44,7 @@ module LSU(
 
     // write back interface
     // store retire interface
-    logic store_retire_valid;
+    input logic store_retire_valid;
     // need to read the preg_rd_index from LSU_IQ
     output logic [`ROB_ENTRY_INDEX_WIDTH-1:0] write_back_index_to_IQ, // use rob index to search for instr
     output logic write_back_index_valid,
@@ -72,18 +57,18 @@ module LSU(
 
 // 令preg_rj_index_out = preg_rj_index / 0 和 preg_rk_index_out = preg_rk_index / 0
 always_comb begin
-    if (reg_rj_exist) begin
-        preg_rj_index_out = preg_rj_index;
+    if (issued_info.issued_reg_rj_exist) begin
+        preg_rj_index_out = issued_info.issued_preg_rj;
     end else begin
         preg_rj_index_out = 0;
     end
-    if (reg_rk_exist) begin
-        preg_rk_index_out = preg_rk_index;
+    if (issued_info.issued_reg_rk_exist) begin
+        preg_rk_index_out = issued_info.issued_preg_rk;
     end else begin
         preg_rk_index_out = 0;
     end
-    if (reg_rd_exist) begin
-        preg_rd_index_out = preg_rd_index;
+    if (issued_info.issued_reg_rd_exist) begin
+        preg_rd_index_out = issued_info.issued_preg_rd;
     end else begin
         preg_rd_index_out = 0;
     end
@@ -137,19 +122,19 @@ always_comb begin
     unsigned_load = 0;
     is_ibar = 0;
 
-    if(gen_op_type == `GENERAL_OPTYPE_2R12I) begin
+    if(issued_info.issued_gen_op_type == `GENERAL_OPTYPE_2R12I) begin
         normal_ls_signal = 1;
-        case (spec_op_type)
+        case (issued_info.issued_spec_op_type)
             `_2R12I_LD_B: begin
                 normal_ls_signal = 1; // 因为store buffer的存在，只能把LD指令的valid信号设置为1，ST指令只有在退休的时候才能发出dcache req
-                final_addr = rj_val + {{20{imm[11]}}, imm[11:0]};
+                final_addr = rj_val + {{20{issued_info.issued_imm[11]}}, issued_info.issued_imm[11:0]};
                 // because the memory is byte-addressable, so LD.B dont need to check alignment
                 size = 2'b0; // load 1 byte
                 unsigned_load = 0; // signed load
             end
             `_2R12I_LD_H: begin
                 normal_ls_signal = 1;
-                final_addr = rj_val + {{20{imm[11]}}, imm[11:0]};
+                final_addr = rj_val + {{20{issued_info.issued_imm[11]}}, issued_info.issued_imm[11:0]};
                 // halfword load = 2 bytes load ,need alignment check
                 size = 2'b1; // load 2 bytes
                 unsigned_load = 0; // signed load
@@ -157,7 +142,7 @@ always_comb begin
             end
             `_2R12I_LD_W: begin
                 normal_ls_signal = 1;
-                final_addr = rj_val + {{20{imm[11]}}, imm[11:0]};
+                final_addr = rj_val + {{20{issued_info.issued_imm[11]}}, issued_info.issued_imm[11:0]};
                 // word load = 4 bytes load, need alignment check
                 size = 2'b10; // load 4 bytes
                 unsigned_load = 0; // signed load
@@ -165,14 +150,14 @@ always_comb begin
             end
             `_2R12I_LD_BU: begin
                 normal_ls_signal = 1;
-                final_addr = rj_val + {{20{imm[11]}}, imm[11:0]};
+                final_addr = rj_val + {{20{issued_info.issued_imm[11]}}, issued_info.issued_imm[11:0]};
                 size = 2'b0;
                 unsigned_load = 1;
                 alignment_error = 0;
             end
             `_2R12I_LD_HU: begin
                 normal_ls_signal = 1;
-                final_addr = rj_val + {{20{imm[11]}}, imm[11:0]};
+                final_addr = rj_val + {{20{issued_info.issued_imm[11]}}, issued_info.issued_imm[11:0]};
                 size = 2'b1;
                 unsigned_load = 1;
                 alignment_error = final_addr[0];
@@ -180,7 +165,7 @@ always_comb begin
             // Store instr
             `_2R12I_ST_B: begin
                 normal_ls_signal = 0; // 先要保存到store buffer中
-                final_addr = rj_val + {{20{imm[11]}}, imm[11:0]};
+                final_addr = rj_val + {{20{issued_info.issued_imm[11]}}, issued_info.issued_imm[11:0]};
                 // because the memory is byte-addressable, so ST.B dont need to check alignment
                 store_data = rd_val;
                 wstrb = 4'b0001; // only one byte
@@ -188,7 +173,7 @@ always_comb begin
             end
             `_2R12I_ST_H: begin
                 normal_ls_signal = 0; // 先要保存到store buffer中
-                final_addr = rj_val + {{20{imm[11]}}, imm[11:0]};
+                final_addr = rj_val + {{20{issued_info.issued_imm[11]}}, issued_info.issued_imm[11:0]};
                 store_data = rd_val;
                 wstrb = 4'b0011; // two bytes
                 is_write = 1;
@@ -196,7 +181,7 @@ always_comb begin
             end
             `_2R12I_ST_W: begin
                 normal_ls_signal = 0; // 先要保存到store buffer中
-                final_addr = rj_val + {{20{imm[11]}}, imm[11:0]};
+                final_addr = rj_val + {{20{issued_info.issued_imm[11]}}, issued_info.issued_imm[11:0]};
                 store_data = rd_val;
                 wstrb = 4'b1111; // four bytes
                 is_write = 1;
@@ -205,19 +190,19 @@ always_comb begin
             // Preld instr
             `_2R12I_PRELD: begin
                 preld_signal = 1;
-                final_addr = rj_val + {{20{imm[11]}}, imm[11:0]};
+                final_addr = rj_val + {{20{issued_info.issued_imm[11]}}, issued_info.issued_imm[11:0]};
                 is_prefetch = 1;
-                hint = imm[25:21]; // hint code (5bits)
+                hint = issued_info.issued_imm[25:21]; // hint code (5bits)
             end
             default: begin
                 normal_ls_signal = 0;
             end
         endcase
-    end else if (gen_op_type == `GENERAL_OPTYPE_CSR) begin
-        if (spec_op_type == `CSR_CACOP) begin
+    end else if (issued_info.issued_gen_op_type == `GENERAL_OPTYPE_CSR) begin
+        if (issued_info.issued_spec_op_type == `CSR_CACOP) begin
             cacop_signal = 1;
-            final_addr = rj_val + {{20{imm[11]}}, imm[11:0]};
-            hint = imm[25:21]; // cacop's code (5bits)
+            final_addr = rj_val + {{20{issued_info.issued_imm[11]}}, issued_info.issued_imm[11:0]};
+            hint = issued_info.issued_imm[25:21]; // cacop's code (5bits)
             if (hint[4:3] == 2'b10) begin
                 // Query-Index CACOP
                 normal_ls_signal = 1; // we treat the Query-Index CACOP as normal load/store instr
@@ -227,31 +212,31 @@ always_comb begin
                 // then we need to writeback the data
             end
         end
-    end else if (gen_op_type == `GENERAL_OPTYPE_ATOMIC) begin
-        if (spec_op_type == `ATOMIC_LL) begin
+    end else if (issued_info.issued_gen_op_type == `GENERAL_OPTYPE_ATOMIC) begin
+        if (issued_info.issued_spec_op_type == `ATOMIC_LL) begin
             normal_ls_signal = 1;
             is_ll = 1;
-            final_addr = rj_val + {{16{imm[13]}}, imm[13:0], 2'b0};
+            final_addr = rj_val + {{16{issued_info.issued_imm[13]}}, issued_info.issued_imm[13:0], 2'b0};
             unsigned_load = 0;
             size = 2'b10; // load 1 word
             alignment_error = final_addr[0] || final_addr[1]; // load 1 word
-        end else if (spec_op_type == `ATOMIC_SC) begin
+        end else if (issued_info.issued_spec_op_type == `ATOMIC_SC) begin
             normal_ls_signal = 0; // 先要保存到store buffer中
             store_data = rd_val;
             is_sc = 1;
-            final_addr = rj_val + {{16{imm[13]}}, imm[13:0], 2'b0};
+            final_addr = rj_val + {{16{issued_info.issued_imm[13]}}, issued_info.issued_imm[13:0], 2'b0};
             alignment_error = final_addr[0] || final_addr[1]; // load 1 word
         end
 
-    end else if (gen_op_type == `GENERAL_OPTYPE_BAR) begin
-        if (spec_op_type == `BAR_DBAR) begin
+    end else if (issued_info.issued_gen_op_type == `GENERAL_OPTYPE_BAR) begin
+        if (issued_info.issued_spec_op_type == `BAR_DBAR) begin
             bar_signal = 1;
             is_ibar = 0;
-            hint = imm[4:0];  // actually we only extract the 15bit hint's LSB 5bits
-        end else if (spec_op_type == `BAR_IBAR) begin
+            hint = issued_info.issued_imm[4:0];  // actually we only extract the 15bit hint's LSB 5bits
+        end else if (issued_info.issued_spec_op_type == `BAR_IBAR) begin
             bar_signal = 1;
             is_ibar = 1;
-            hint = imm[4:0];  // actually we only extract the 15bit hint's LSB 5bits
+            hint = issued_info.issued_imm[4:0];  // actually we only extract the 15bit hint's LSB 5bits
         end
     end
 end
@@ -277,7 +262,7 @@ always_ff @(posedge clk or negedge rst_n) begin
             cache_req.is_sc <= store_buffer[store_buffer_head].is_sc;
             cache_req.is_prefetch <= store_buffer[store_buffer_head].is_prefetch;
             // CACOP is not store instr
-            if(store_or_load) begin
+            if(issued_info.issued_store_or_load) begin
                 store_buffer[store_buffer_tail].rd_data <= rd_val;
                 store_buffer[store_buffer_tail].final_addr <= final_addr;
                 store_buffer[store_buffer_tail].wstrb <= wstrb;
@@ -290,7 +275,7 @@ always_ff @(posedge clk or negedge rst_n) begin
             end
         end else begin // 没有store retire但是有load指令
             // if the store_or_load is 1, means we should insert this store instr into the store buffer
-            if(store_or_load) begin
+            if(issued_info.issued_store_or_load) begin
                 store_buffer[store_buffer_tail].rd_data <= rd_val;
                 store_buffer[store_buffer_tail].final_addr <= final_addr;
                 store_buffer[store_buffer_tail].wstrb <= wstrb;
@@ -335,7 +320,7 @@ always_ff @(posedge clk or negedge rst_n) begin
     end
     else if(!store_retire_valid) begin // 没有store要退休，正常发出cache req
         // cache_req info
-        cache_req.rob_entry_index <= issued_lsu_index;
+        cache_req.rob_entry_index <= issued_info.issued_lsu_index;
         cache_req.addr <= final_addr;
         cache_req.data <= store_data;
         cache_req.wstrb <= wstrb;
@@ -360,7 +345,7 @@ always_ff @(posedge clk or negedge rst_n) begin
         preld_req.valid <= preld_signal;
 
         // bar info 
-        bar_req.rob_entry_index <= issued_lsu_index;
+        bar_req.rob_entry_index <= issued_info.issued_lsu_index;
         bar_req.hint <= hint;
         bar_req.valid <= bar_signal;
         bar_req.is_ibar <= is_ibar;
@@ -405,7 +390,7 @@ always_comb begin
         // only when the completion signal valid is 1 we need to write back the data to PRF
         write_back_index_to_IQ = cache_resp_reg.rob_entry_index;
         write_back_index_valid = 1; 
-        write_prf_valid = !is_write; // 只有load指令需要写回寄存器
+        write_prf_valid = !issued_info.issued_store_or_load; // 只有load指令需要写回寄存器
         write_prf_data = cache_resp_reg.data;
         write_back_preg_rd_index_out = cache_resp_reg.preg_rd_index;
         // 还有其他的需要写回吗？

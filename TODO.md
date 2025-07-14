@@ -21,5 +21,3 @@ logic [3:0] bar_type_vec [1:0] 是2个4bit数组
 arch_rd_0永远都只能映射到PRF preg_0
 
 # FU写回忙表的端口好像还没给？可能需要增加一下
-
-# 

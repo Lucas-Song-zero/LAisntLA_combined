@@ -1,53 +1,39 @@
 `timescale 1ns / 1ps
-`include "defs.sv"
+`include "mycpu.h"
 
 module ROB (
     input clk,
     input rst_n,
     input flush,
     input stall,
-
-    // interface with rename
-    // input logic [3:0] instr_valid_vec,
     input logic [2:0] write_in_num, // 表示每个周期写入的指令数量 (指令是顺序排列的)
-    output logic [`ROB_ENTRY_INDEX_WIDTH-1:0] rob_entry_index_start, // the start index of incoming instr in the rob entry
+    input logic [`ROB_ENTRY_INDEX_WIDTH-1:0] rob_entry_index_start, // the start index of incoming instr in the rob entry
     output logic alloc_success,
-    input logic [31:0] pc_vec [3:0],
-    input logic [4:0] arch_rd_index_vec [3:0],
-    input logic [`PREG_INDEX_WIDTH-1:0] preg_rd_index_vec [3:0],
-    input logic [`PREG_INDEX_WIDTH-1:0] rd_history_index_vec [3:0],
-    input logic [3:0] rd_exist_vec,
-    input logic [3:0] gen_op_type_vec [3:0],
-    input logic [4:0] spec_op_type_vec [3:0],
-    input logic [2:0] pred_BJ_type_vec [3:0], // 0 表示普通分支指令, 1 表示B指令(相当于直接跳转) , 2 表示 BL (相当于JAL) , 3 表示 普通非调用间接跳转指令 , 4 表示 函数返回指令(JR $ra类似于)
-    input logic [31:0] pred_BJ_jump_pc_vec [3:0], // 预测的跳转PC
-    // 上面两个信号都是预测的
-    input logic store_or_load_vec [3:0],
-    input logic [`ROB_MAINBODY_ENTRY_exception_width-1:0] exception_vec [3:0], // decoder解码出来一些CSR会在这里设置出来exception
-    input logic completion_vec [3:0], // 每个周期写入的指令的完成情况
+    // interface with rename
+    input rob_instr_info_t rob_instr_info, // 指令信息结构体数组
 
     // interface with issue and FU
     input logic [`ROB_ENTRY_INDEX_WIDTH-1:0] complete_entry_index_vec [3:0], // used to set corresponding entry completion bit to 1
     input logic [3:0] complete_valid_vec,
-    input logic [`ROB_MAINBODY_ENTRY_exception_width-1:0] FU_exception_vec [3:0], // 从FU返回的exception
-    input logic [31:0] FU_jump_pc_vec [3:0], // 从FU返回的跳转PC(如果是分支指令完成了，就要写回具体的跳转地址)
-    input logic [3:0] FU_jump_pc_pred_wrong, // 如果预测错误了，就要在退休的时候跳转保存的PC
+    input logic [`ROB_MAINBODY_ENTRY_exception_width-1:0] fu_exception_vec [3:0], // 从FU返回的exception
+    input logic [31:0] fu_jump_pc_vec [3:0], // 从FU返回的跳转PC(如果是分支指令完成了，就要写回具体的跳转地址)
+    input logic [3:0] fu_jump_pc_pred_wrong, // 如果预测错误了，就要在退休的时候跳转保存的PC
     // 没有例外，返回值就是0
     // input logic FU_exception_valid_vec [3:0], // 从FU返回的exception是否有效 (感觉可以不需要？)
     
     // interface with LSU (前面的completion也包括了LSU，这里是额外的Store Buffer的控制信号)
     // because only one store instr retires, 才能写D-Cache
-    output logic store_write_dcache_valid, // 从Store Buffer中pop out 第一条写到D-Cache中
+    output logic store_retire_valid, // 从Store Buffer中pop out 第一条写到D-Cache中
     // 每个周期最多只会退休一条Store指令
 
     // Exception interface and CSR interface
-    output logic [`ROB_MAINBODY_ENTRY_exception_width-1:0] rob_entry_exception_vec,
+    output logic [`ROB_MAINBODY_ENTRY_exception_width-1:0] rob_entry_exception,
     // 每个周期最多退休一条有exception的指令
 
     // aRAT interface
-    output logic recover_valid, // if "general exception"(包括了分支预测失败) occurs ，则需要recover_valid
+    output logic retire_valid, // 正常退休，更新aRAT和freelist
     output logic [4:0] aRAT_write_arch_rd_index_vec [3:0],
-    output logic [`PREG_INDEX_WIDTH-1:0] aRAT_write_preg_index_vec [3:0],
+    output logic [`PREG_INDEX_WIDTH-1:0] recover_aRAT_write_preg_index_vec [3:0],
     output logic [3:0] write_preg_valid_vec, // exactly equal to rd_exist_vec
     // used both for aRAT and freelist
 
@@ -96,7 +82,7 @@ always_comb begin
     ready_mask = 4'b1111;
     // retire_mask = 4'b0;
 
-    for(int i=0; i<4; i=i+1) begin
+    for(integer i=0; i<4; i=i+1) begin
         if(rob_mainbody[rob_head + i].gen_op_type == `GENERAL_OPTYPE_BJ) begin
             branch_vec[i] = 1'b1;
         end
@@ -178,20 +164,22 @@ always_ff @(posedge clk or negedge rst_n) begin
         end
     end else begin
         if(alloc_success) begin
-            for(int i=0; i<write_in_num; i=i+1) begin
-                // 写入
-                rob_pc[rob_tail + i] <= pc_vec[i];
-                rob_mainbody[rob_tail + i].exception <= exception_vec[i];
-                rob_mainbody[rob_tail + i].completion <= completion_vec[i];
-                rob_mainbody[rob_tail + i].arch_rd_index <= arch_rd_index_vec[i];
-                rob_mainbody[rob_tail + i].preg_rd_index <= preg_rd_index_vec[i];
-                rob_mainbody[rob_tail + i].rd_history_index <= rd_history_index_vec[i];
-                rob_mainbody[rob_tail + i].gen_op_type <= gen_op_type_vec[i];
-                rob_mainbody[rob_tail + i].spec_op_type <= spec_op_type_vec[i];
-                rob_mainbody[rob_tail + i].store_or_load <= store_or_load_vec[i];
-                rob_mainbody[rob_tail + i].rd_exist <= rd_exist_vec[i];
-                BJ_jump_entry[rob_tail + i].BJ_type <= pred_BJ_type_vec[i];
-                BJ_jump_entry[rob_tail + i].real_jump_pc <= pred_BJ_jump_pc_vec[i];
+            for(int i=0; i<4; i=i+1) begin
+                if(i < write_in_num) begin
+                    // 写入
+                    rob_pc[rob_tail + i] <= rob_instr_info.instr[i].pc;
+                    rob_mainbody[rob_tail + i].exception <= rob_instr_info.instr[i].exception;
+                    rob_mainbody[rob_tail + i].completion <= rob_instr_info.instr[i].completion;
+                    rob_mainbody[rob_tail + i].arch_rd_index <= rob_instr_info.instr[i].arch_rd_index;
+                    rob_mainbody[rob_tail + i].preg_rd_index <= rob_instr_info.instr[i].preg_rd_index;
+                    rob_mainbody[rob_tail + i].rd_history_index <= rob_instr_info.instr[i].rd_history_index;
+                    rob_mainbody[rob_tail + i].gen_op_type <= rob_instr_info.instr[i].gen_op_type;
+                    rob_mainbody[rob_tail + i].spec_op_type <= rob_instr_info.instr[i].spec_op_type;
+                    rob_mainbody[rob_tail + i].store_or_load <= rob_instr_info.instr[i].store_or_load;
+                    rob_mainbody[rob_tail + i].rd_exist <= rob_instr_info.instr[i].rd_exist;
+                    BJ_jump_entry[rob_tail + i].BJ_type <= rob_instr_info.instr[i].pred_BJ_type;
+                    BJ_jump_entry[rob_tail + i].real_jump_pc <= rob_instr_info.instr[i].pred_BJ_jump_pc;
+                end
             end
             // 退休
             // 默认赋值，防止一些关键信号没有被复位
@@ -200,54 +188,56 @@ always_ff @(posedge clk or negedge rst_n) begin
             BJ_retire_valid <= 1'b0; // 防止一直更新BPU
             store_write_dcache_valid <= 1'b0; // 防止一直写dcache
 
-            for(int i=0; i<retire_num; i=i+1) begin
-                // 所有指令都需要对aRAT和freelist进行更新
-                write_preg_valid_vec[i] <= rob_mainbody[rob_head + i].rd_exist;
-                // aRAT_write_arch_rd_index_vec[i] <= (rob_mainbody[rob_head + i].rd_exist) ? rob_mainbody[rob_head + i].arch_rd_index : 5'b0;
-                // aRAT_write_preg_index_vec[i] <= (rob_mainbody[rob_head + i].rd_exist) ? rob_mainbody[rob_head + i].preg_rd_index : `PREG_INDEX_WIDTH'b0;
-                aRAT_write_arch_rd_index_vec[i] <= rob_mainbody[rob_head + i].arch_rd_index;
-                aRAT_write_preg_index_vec[i] <= rob_mainbody[rob_head + i].preg_rd_index;
-                // 退休之后要保证completion_bit被reset为0
-                rob_mainbody[rob_head + i].completion <= 0;
-                
-                // 然后是freelist的更新
-                // freed_preg_index_vec[i] <= (rob_mainbody[rob_head + i].rd_exist) ? rob_mainbody[rob_head + i].preg_rd_index : `PREG_INDEX_WIDTH'b0;
-                freed_preg_index_vec[i] <= rob_mainbody[rob_head + i].rd_history_index;
-                
-                if(rob_mainbody[rob_head + i].exception == 1) begin
-                    // 0 代表没意外 ， 1表示分支跳转失败
-                    // 分支预测失败，需要从BJ_jump_entry中取出正确的跳转地址
-                    recover_valid <= 1'b1;
-                    real_jump_pc <= BJ_jump_entry[rob_head + i].real_jump_pc; // 要跳到真正的跳转地址
-                    pred_wrong_signal <= 1'b1; // 预测失败，需要重新取指
-                    output_instr_pc_for_bpu_update <= rob_pc[rob_head + i]; // 用于更新BPU table
-                    output_bj_type_for_bpu_update <= BJ_jump_entry[rob_head + i].BJ_type;
-
-                end else if (rob_mainbody[rob_head + i].exception > 1) begin
-                    // 有例外，如果有例外，其后面肯定就没有指令要退休了
-                    // 发射给CSR unit统一进行处理
-                    CSR_exception <= rob_mainbody[rob_head + i].exception;
-                    CSR_exception_pc <= rob_pc[rob_head + i];
-                    CSR_exception_valid <= 1'b1;
-                    // 可能还有其他的需要处理?
-                end else begin // 没有例外                
-                    if(rob_mainbody[rob_head + i].gen_op_type == `GENERAL_OPTYPE_BJ) begin
-                        // 分支指令
-                        BJ_retire_valid <= 1'b1;
+            for(int i=0; i<4; i=i+1) begin
+                if(i < retire_num) begin
+                    // 所有指令都需要对aRAT和freelist进行更新
+                    write_preg_valid_vec[i] <= rob_mainbody[rob_head + i].rd_exist;
+                    // aRAT_write_arch_rd_index_vec[i] <= (rob_mainbody[rob_head + i].rd_exist) ? rob_mainbody[rob_head + i].arch_rd_index : 5'b0;
+                    // aRAT_write_preg_index_vec[i] <= (rob_mainbody[rob_head + i].rd_exist) ? rob_mainbody[rob_head + i].preg_rd_index : `PREG_INDEX_WIDTH'b0;
+                    aRAT_write_arch_rd_index_vec[i] <= rob_mainbody[rob_head + i].arch_rd_index;
+                    aRAT_write_preg_index_vec[i] <= rob_mainbody[rob_head + i].preg_rd_index;
+                    // 退休之后要保证completion_bit被reset为0
+                    rob_mainbody[rob_head + i].completion <= 0;
+                    
+                    // 然后是freelist的更新
+                    // freed_preg_index_vec[i] <= (rob_mainbody[rob_head + i].rd_exist) ? rob_mainbody[rob_head + i].preg_rd_index : `PREG_INDEX_WIDTH'b0;
+                    freed_preg_index_vec[i] <= rob_mainbody[rob_head + i].rd_history_index;
+                    
+                    if(rob_mainbody[rob_head + i].exception == 1) begin
+                        // 0 代表没意外 ， 1表示分支跳转失败
+                        // 分支预测失败，需要从BJ_jump_entry中取出正确的跳转地址
+                        recover_valid <= 1'b1;
+                        real_jump_pc <= BJ_jump_entry[rob_head + i].real_jump_pc; // 要跳到真正的跳转地址
+                        pred_wrong_signal <= 1'b1; // 预测失败，需要重新取指
                         output_instr_pc_for_bpu_update <= rob_pc[rob_head + i]; // 用于更新BPU table
                         output_bj_type_for_bpu_update <= BJ_jump_entry[rob_head + i].BJ_type;
-                        // 没有例外，说明没有出现预测失败，不需要刷掉流水线和重新取指
-                    end else if (rob_mainbody[rob_head + i].gen_op_type == `GENERAL_OPTYPE_2R12I) begin
-                        // some store instr
-                        case(rob_mainbody[rob_head + i].spec_op_type)
-                            `_2R12I_ST_B: store_write_dcache_valid <= 1'b1;
-                            `_2R12I_ST_H: store_write_dcache_valid <= 1'b1;
-                            `_2R12I_ST_W: store_write_dcache_valid <= 1'b1;
-                            default: store_write_dcache_valid <= 1'b0;
-                        endcase
-                    end else if (rob_mainbody[rob_head + i].gen_op_type == `GENERAL_OPTYPE_ATOMIC && rob_mainbody[rob_head + i].store_or_load) begin
-                        // SC instr
-                        store_write_dcache_valid <= 1'b1;
+
+                    end else if (rob_mainbody[rob_head + i].exception > 1) begin
+                        // 有例外，如果有例外，其后面肯定就没有指令要退休了
+                        // 发射给CSR unit统一进行处理
+                        CSR_exception <= rob_mainbody[rob_head + i].exception;
+                        CSR_exception_pc <= rob_pc[rob_head + i];
+                        CSR_exception_valid <= 1'b1;
+                        // 可能还有其他的需要处理?
+                    end else begin // 没有例外                
+                        if(rob_mainbody[rob_head + i].gen_op_type == `GENERAL_OPTYPE_BJ) begin
+                            // 分支指令
+                            BJ_retire_valid <= 1'b1;
+                            output_instr_pc_for_bpu_update <= rob_pc[rob_head + i]; // 用于更新BPU table
+                            output_bj_type_for_bpu_update <= BJ_jump_entry[rob_head + i].BJ_type;
+                            // 没有例外，说明没有出现预测失败，不需要刷掉流水线和重新取指
+                        end else if (rob_mainbody[rob_head + i].gen_op_type == `GENERAL_OPTYPE_2R12I) begin
+                            // some store instr
+                            case(rob_mainbody[rob_head + i].spec_op_type)
+                                `_2R12I_ST_B: store_write_dcache_valid <= 1'b1;
+                                `_2R12I_ST_H: store_write_dcache_valid <= 1'b1;
+                                `_2R12I_ST_W: store_write_dcache_valid <= 1'b1;
+                                default: store_write_dcache_valid <= 1'b0;
+                            endcase
+                        end else if (rob_mainbody[rob_head + i].gen_op_type == `GENERAL_OPTYPE_ATOMIC && rob_mainbody[rob_head + i].store_or_load) begin
+                            // SC instr
+                            store_write_dcache_valid <= 1'b1;
+                        end
                     end
                 end
             end

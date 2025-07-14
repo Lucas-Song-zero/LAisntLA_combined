@@ -26,67 +26,27 @@ module LSU_issue_queue(
     input logic rename_valid,
     input logic fu_ready,
     input logic [1:0] rename_instr_num,
-    input logic [`ROB_ENTRY_INDEX_WIDTH-1:0] rob_entry_vec [3:0],
     input logic [`LSU_IQ_INDEX_WIDTH:0] completion_index, // 用于LSU返回完成情况的时候index使用
+    // 指令信息数组
+    input lsu_single_instr_info_t instr_info [3:0],
     output logic issue_ready,
     output logic issue_valid, // issue info valid
-    output logic IQ_full,
-    output logic IQ_empty,
-    
 
-    // necessary info to store
-    input logic [3:0] gen_op_type_vec [3:0],
-    input logic [3:0] spec_op_type_vec [4:0],
-    input logic [3:0] store_or_load_vec, // received from decode 1 means store 0 means load
-    input logic [1:0] bar_type_vec [3:0], // 00 -- normal , 01 -- dbar , 10 -- ibar
-    input logic [3:0] imm_vec [25:0],
-    input logic [3:0] imm_enable_vec,
-    input logic [4:0] arch_rd_index,
-    input logic [3:0] preg_rd_vec [`PREG_INDEX_WIDTH-1:0],
-    input logic [3:0] preg_rj_vec [`PREG_INDEX_WIDTH-1:0],
-    input logic [3:0] preg_rk_vec [`PREG_INDEX_WIDTH-1:0],
-    input logic [3:0] reg_rd_exist_vec,
-    input logic [3:0] reg_rj_exist_vec,
-    input logic [3:0] reg_rk_exist_vec,
-    input logic [3:0] rj_ready_vec,
-    input logic [3:0] rk_ready_vec,
-    input logic [3:0] rd_ready_vec,
-
-    // wake-up signal
+    // wake_up signal
     // wake-up signals inside the queue, if one instr is selected in ALU_IQ
     // then in this cycle, we will wake up the related instrs
     // but the inside wake up signals don't need io
     input logic [3:0] write_back_rd_exist_vec,
-    input logic [`PREG_INDEX_WIDTH-1:0] write_back_rd_index_0,
-    input logic [`PREG_INDEX_WIDTH-1:0] write_back_rd_index_1,
-    input logic [`PREG_INDEX_WIDTH-1:0] write_back_rd_index_2,
-    input logic [`PREG_INDEX_WIDTH-1:0] write_back_rd_index_3,
+    input logic [`PREG_INDEX_WIDTH-1:0] write_back_rd_index_vec [3:0],
 
     // when issue is ready, give out some info to FU
-    output logic [3:0] issued_gen_op_type,
-    output logic [4:0] issued_spec_op_type,
-    output logic [25:0] issued_imm,
-    output logic issued_imm_enable,
-    output logic [`PREG_INDEX_WIDTH-1:0] issued_preg_rd,
-    output logic [`PREG_INDEX_WIDTH-1:0] issued_preg_rj,
-    output logic [`PREG_INDEX_WIDTH-1:0] issued_preg_rk,
-    output logic issued_reg_rd_exist,
-    output logic issued_reg_rj_exist,
-    output logic issued_reg_rk_exist,
-    output logic [`LSU_IQ_INDEX_WIDTH:0] issued_lsu_index, // for tracking the instr
-    output logic [`ROB_ENTRY_INDEX_WIDTH-1:0] issued_rob_entry_index,
-    output logic issued_store_or_load,
-    output logic issued_bar_type,
+    output lsu_issue_queue_issued_info_t issued_info,
     
     input logic [`LSU_IQ_INDEX_WIDTH-1:0] completion_index_in, // LSU completion index back from ROB
-    input logic completion_in_valid // completion info write back in valid signal
-    // exception outputs (LSU should output it, not the LSU_IQ)
+    input logic completion_in_valid, // completion info write back in valid signal
     
-    // output logic exception_ALE, // LS instr addr not naturally aligned (when issue need check the alignment)
-
     // write back interface
-    input logic [3:0] write_back_rd_exist_vec,
-    input logic [`LSU_IQ_INDEX_WIDTH-1:0] wb_completion_index, // index for setting completion bit to 1
+    input logic [`LSU_IQ_INDEX_WIDTH-1:0] wb_completion_index // index for setting completion bit to 1
 );
 
 logic [`LSU_IQ_ENTRY_WIDTH-1:0] lsu_issue_queue [`LSU_IQ_DEPTH-1:0];
@@ -97,8 +57,6 @@ logic [`LSU_IQ_INDEX_WIDTH-1:0] lsu_index_queue [`LSU_IQ_DEPTH-1:0];
 logic [`LSU_IQ_INDEX_WIDTH:0] filled_entry_cnt; // 0~64
 logic [`LSU_IQ_INDEX_WIDTH:0] latest_input_index; // used for tracking the wb completion instr index
 
-assign IQ_full = (filled_entry_cnt == `LSU_IQ_DEPTH);
-assign IQ_empty = (filled_entry_cnt == 0);
 logic alloc_success;
 assign alloc_success = (filled_entry_cnt+rename_instr_num <= `LSU_IQ_DEPTH);
 assign issue_ready = alloc_success;
@@ -126,7 +84,7 @@ logic next_issued_page_diff_index; // 0 or 1
 logic [`LSU_IQ_INDEX_WIDTH-1:0] dbar_index;
 logic [`LSU_IQ_INDEX_WIDTH-1:0] ibar_index;
 logic store_before_ibar; // signal represents if there exists store before ibar
-logic not_issued_before_dbar; // signal repre if exists not issued L/S instr before dbar
+logic not_completed_before_dbar; // signal repre if exists not completed L/S instr before dbar
 
 always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
@@ -184,7 +142,7 @@ always_ff @(posedge clk or negedge rst_n) begin
         end // if ibar_index == 0 means no ibar 
 
         // 2. issue + pre-wakeup + compress
-        if (fu_ready && !IQ_empty) begin
+        if (fu_ready) begin
             issue_valid <= 0;
             for(int i=0; i<`LSU_IQ_DEPTH; i++) begin
                 if(next_lsu_issue_queue[i].issued == 1'b0
@@ -222,7 +180,7 @@ always_ff @(posedge clk or negedge rst_n) begin
                     
                     // preld instr dont care the real completion status
                     // so we just set the completion bit to 1 when issued
-                    if(next_lsu_op_type_queue[i][8:5] == `GENERAL_OPTYPE_LS && next_lsu_op_type_queue[i][4:0] == `LS_PRELD) begin
+                    if(next_lsu_op_type_queue[i][8:5] == `GENERAL_OPTYPE_2R12I && next_lsu_op_type_queue[i][4:0] == `_2R12I_PRELD) begin
                         next_lsu_issue_queue[i].completion = 1'b1;
                     end else begin
                         next_lsu_issue_queue[i].completion = 1'b0;
@@ -250,47 +208,33 @@ always_ff @(posedge clk or negedge rst_n) begin
         end
 
         // 3. write in new instr
-        if(rename_valid && !IQ_full && alloc_success) begin
-            for(int x=0; x<rename_instr_num; x=x+1) begin
-                next_store_block_index = next_store_block_index + store_or_load_vec[x];
-                // next_lsu_issue_queue[next_filled_entry_cnt] = 
-                // {
-                //     bar_type_vec[x], // 38-37
-                //     store_or_load_vec[x], // 36
-                //     next_store_block_index, // 35-29                   
-                //     1'b0, // completion bit // 28
-                //     preg_rj_vec[x], // 27-21
-                //     reg_rj_exist_vec[x], // 20
-                //     1'b0, // rj_ready (19)
-                //     preg_rk_vec[x], // 18-12
-                //     reg_rk_exist_vec[x], // 11
-                //     1'b0, // rk_ready (10)
-                //     preg_rd_vec[x], // 9-3
-                //     reg_rd_exist_vec[x], // 2
-                //     imm_enable_vec[x], // 1
-                //     1'b0 // issued (0)
-                // };
-                next_lsu_issue_queue[next_filled_entry_cnt].rob_entry_index = rob_entry_vec[x];
-                next_lsu_issue_queue[next_filled_entry_cnt].rj_index = preg_rj_vec[x];
-                next_lsu_issue_queue[next_filled_entry_cnt].rj_valid = reg_rj_exist_vec[x];
-                next_lsu_issue_queue[next_filled_entry_cnt].rj_ready = rj_ready_vec[x];
-                next_lsu_issue_queue[next_filled_entry_cnt].rk_index = preg_rk_vec[x];
-                next_lsu_issue_queue[next_filled_entry_cnt].rk_valid = reg_rk_exist_vec[x];
-                next_lsu_issue_queue[next_filled_entry_cnt].rk_ready = rk_ready_vec[x];
-                next_lsu_issue_queue[next_filled_entry_cnt].rd_index = preg_rd_vec[x];
-                next_lsu_issue_queue[next_filled_entry_cnt].rd_valid = reg_rd_exist_vec[x];
-                next_lsu_issue_queue[next_filled_entry_cnt].rd_ready = rd_ready_vec[x];
-                next_lsu_issue_queue[next_filled_entry_cnt].imm_enable = imm_enable_vec[x];
-                next_lsu_issue_queue[next_filled_entry_cnt].store_or_load = store_or_load_vec[x];
-                next_lsu_issue_queue[next_filled_entry_cnt].bar_type = bar_type_vec[x];
-                next_lsu_issue_queue[next_filled_entry_cnt].page_diff_index = next_latest_input_index[`LSU_IQ_INDEX_WIDTH];
-                next_lsu_issue_queue[next_filled_entry_cnt].store_block_index = next_latest_input_index[`LSU_IQ_INDEX_WIDTH-1:0];
-                next_lsu_issue_queue[next_filled_entry_cnt].completion = 1'b0;
+        if(rename_valid && alloc_success) begin
+            for(int x=0; x<4; x=x+1) begin
+                if(x < rename_instr_num) begin
+                     next_store_block_index = next_store_block_index + instr_info[x].store_or_load;
 
-                next_lsu_imm_queue[next_filled_entry_cnt] = imm_vec[x];
-                next_lsu_op_type_queue[next_filled_entry_cnt] = {gen_op_type_vec[x], spec_op_type_vec[x]};
-                next_latest_input_index = next_latest_input_index + 1;
-                next_filled_entry_cnt = next_filled_entry_cnt + 1;
+                    next_lsu_issue_queue[next_filled_entry_cnt].rob_entry_index = instr_info[x].rob_entry;
+                    next_lsu_issue_queue[next_filled_entry_cnt].rj_index = instr_info[x].preg_rj;
+                    next_lsu_issue_queue[next_filled_entry_cnt].rj_valid = instr_info[x].reg_rj_exist;
+                    next_lsu_issue_queue[next_filled_entry_cnt].rj_ready = instr_info[x].rj_ready;
+                    next_lsu_issue_queue[next_filled_entry_cnt].rk_index = instr_info[x].preg_rk;
+                    next_lsu_issue_queue[next_filled_entry_cnt].rk_valid = instr_info[x].reg_rk_exist;
+                    next_lsu_issue_queue[next_filled_entry_cnt].rk_ready = instr_info[x].rk_ready;
+                    next_lsu_issue_queue[next_filled_entry_cnt].rd_index = instr_info[x].preg_rd;
+                    next_lsu_issue_queue[next_filled_entry_cnt].rd_valid = instr_info[x].reg_rd_exist;
+                    next_lsu_issue_queue[next_filled_entry_cnt].rd_ready = instr_info[x].rd_ready;
+                    next_lsu_issue_queue[next_filled_entry_cnt].imm_enable = instr_info[x].imm_enable;
+                    next_lsu_issue_queue[next_filled_entry_cnt].store_or_load = instr_info[x].store_or_load;
+                    next_lsu_issue_queue[next_filled_entry_cnt].bar_type = instr_info[x].bar_type;
+                    next_lsu_issue_queue[next_filled_entry_cnt].page_diff_index = next_latest_input_index[`LSU_IQ_INDEX_WIDTH];
+                    next_lsu_issue_queue[next_filled_entry_cnt].store_block_index = next_latest_input_index[`LSU_IQ_INDEX_WIDTH-1:0];
+                    next_lsu_issue_queue[next_filled_entry_cnt].completion = 1'b0;
+
+                    next_lsu_imm_queue[next_filled_entry_cnt] = instr_info[x].imm;
+                    next_lsu_op_type_queue[next_filled_entry_cnt] = {instr_info[x].gen_op_type, instr_info[x].spec_op_type};
+                    next_latest_input_index = next_latest_input_index + 1;
+                    next_filled_entry_cnt = next_filled_entry_cnt + 1;
+                end
             end
         end
 
@@ -304,10 +248,10 @@ always_ff @(posedge clk or negedge rst_n) begin
             endcase
             if(write_back_rd_exist_vec[i]) begin
                 for(int j=0; j<`LSU_IQ_DEPTH; j++) begin
-                    if(next_lsu_issue_queue[j][`LSU_IQ_ENTRY_rj_index_pos] == wb_rd_index) begin
-                        next_lsu_issue_queue[j][`LSU_IQ_ENTRY_rj_ready_pos] = 1'b1;
-                    end else if(next_lsu_issue_queue[j][`LSU_IQ_ENTRY_rk_index_pos] == wb_rd_index) begin
-                        next_lsu_issue_queue[j][`LSU_IQ_ENTRY_rk_ready_pos] = 1'b1;
+                    if(next_lsu_issue_queue[j].rj_index == wb_rd_index) begin
+                        next_lsu_issue_queue[j].rj_ready = 1'b1;
+                    end else if(next_lsu_issue_queue[j].rk_index == wb_rd_index) begin
+                        next_lsu_issue_queue[j].rk_ready = 1'b1;
                     end
                 end
             end
@@ -325,14 +269,5 @@ always_ff @(posedge clk or negedge rst_n) begin
     end
 end
 
-always_comb begin
-    write_back_preg_rd_index_out = 0;
-    if(write_back_index_valid) begin
-        for(int i=0; i<`LSU_IQ_DEPTH; i++) begin
-            if(lsu_index_queue[i] == write_back_index_to_IQ) begin
-                write_back_preg_rd_index_out = lsu_issue_queue[i][`LSU_IQ_ENTRY_rd_index_pos];
-            end
-        end
-    end
-end
+
 endmodule

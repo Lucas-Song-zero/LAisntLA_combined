@@ -148,6 +148,7 @@ decoder还需要注意exception的提前给出（各种CSR指令）
 `define ATOMIC_SC 2'b10
 
 // bar -> 2 instrs (op_type 2bits: 00=invalid, 01=DBAR, 10=IBAR)
+`define BAR_NORMAL 2'b00
 `define BAR_DBAR 2'b01
 `define BAR_IBAR 2'b10
 
@@ -263,17 +264,21 @@ execute结果写回Issue Queue，同时再发射到ROB，标记对应entry为完
 typedef struct packed {
     logic [`ROB_ENTRY_INDEX_WIDTH-1:0] rob_entry_index;
     logic [`PREG_INDEX_WIDTH-1:0] rj_index;
-    logic rj_valid;
+    logic rj_exist;
     logic rj_ready;
     logic [`PREG_INDEX_WIDTH-1:0] rk_index;
-    logic rk_valid;
+    logic rk_exist;
     logic rk_ready;
     logic [`PREG_INDEX_WIDTH-1:0] rd_index;
-    logic rd_valid;
+    logic [4:0] arch_rd_index;
+    logic rd_exist;
     logic pred_taken; // 预测这条指令是否taken
     // logic rd_ready; // 在目前的定义中，只有store是需要使用rd的数据，所以我觉得目前不写rd_ready也是合理的
     logic imm_enable;
+    logic imm_sign_extend;
     logic issued;
+    logic [1:0] pred_cut_pos;
+    logic [1:0] instr_pos;
 } SIMPLE_IQ_ENTRY_t;
 
 // DIV and MOD latency is 4 clk, so we need to delay 3 clks
@@ -322,6 +327,126 @@ typedef struct packed {
     logic issued;
     logic completion;
 } LSU_IQ_ENTRY_t;
+
+// 发射队列输入结构体定义
+// 只包含rename输出的指令信息，不包含控制信号
+// Simple IQ 单条指令信息结构体
+typedef struct packed {
+    logic [`ROB_ENTRY_INDEX_WIDTH-1:0] rob_entry_index;
+    logic [3:0] gen_op_type;
+    logic [4:0] spec_op_type;
+    logic [25:0] imm;
+    logic imm_enable;
+    logic imm_sign_extend;
+    logic [`PREG_INDEX_WIDTH-1:0] preg_rd;
+    logic [`PREG_INDEX_WIDTH-1:0] preg_rj;
+    logic [`PREG_INDEX_WIDTH-1:0] preg_rk;
+    logic reg_rd_exist;
+    logic reg_rj_exist;
+    logic reg_rk_exist;
+    logic rj_ready; // read from busy table and wb-bypass
+    logic rk_ready; // read from busy table and wb-bypass
+    logic [31:0] pc; // used for BJ and PCADDU12I
+    logic [31:0] fetch_start_pc; // 这个预测块的取指起始pc
+    logic pred_taken; // input pred if this instr is a taken branch
+    logic [1:0] pred_cut_pos; // 预测的分支指令位置
+    logic [1:0] instr_pos; // 指令在取指块中的位置
+    logic [31:0] pred_jump_pc; // used for BJ
+} simple_single_instr_info_t;
+
+// Simple Issue Queue 输出结构体 - 只包含发射的指令信息
+typedef struct packed {
+    logic [`ROB_ENTRY_INDEX_WIDTH-1:0] issued_rob_entry_index;
+    logic [3:0] issued_gen_op_type;
+    logic [4:0] issued_spec_op_type;
+    logic [25:0] issued_imm;
+    logic issued_imm_enable;
+    logic issued_imm_sign_extend;
+    logic [31:0] issued_pc;
+    logic [`PREG_INDEX_WIDTH-1:0] issued_preg_rd;
+    logic [`PREG_INDEX_WIDTH-1:0] issued_preg_rj;
+    logic [`PREG_INDEX_WIDTH-1:0] issued_preg_rk;
+    logic issued_reg_rd_exist;
+    logic issued_reg_rj_exist;
+    logic issued_reg_rk_exist;
+    // used for PRF read-out
+    logic [31:0] issued_pred_jump_pc; // 预测的指令跳转pc
+    logic issued_pred_taken; // 预测这条指令是否taken
+    logic [1:0] issued_pred_cut_pos; // 预测的分支指令位置
+    logic [1:0] issued_instr_pos; // 实际发射指令在这个取指块中的位置
+    logic [31:0] issued_fetch_start_pc; // 实际发射指令所在取指块的取指起始地址
+} simple_issue_queue_issued_info_t;
+
+// Complex Issue Queue 单条指令信息结构体
+typedef struct packed {
+    logic [3:0] gen_op_type;
+    logic [4:0] spec_op_type;
+    logic [25:0] imm;
+    logic imm_enable;
+    logic [`ROB_ENTRY_INDEX_WIDTH-1:0] rob_entry;
+    logic [`PREG_INDEX_WIDTH-1:0] preg_rd;
+    logic [`PREG_INDEX_WIDTH-1:0] preg_rj;
+    logic [`PREG_INDEX_WIDTH-1:0] preg_rk;
+    logic reg_rd_exist;
+    logic reg_rj_exist;
+    logic reg_rk_exist;
+    logic rj_ready; // read from busy table and wb-bypass
+    logic rk_ready; // read from busy table and wb-bypass
+} complex_single_instr_info_t;
+
+// Complex Issue Queue 输出结构体 - 只包含发射的指令信息
+typedef struct packed {
+    logic [`ROB_ENTRY_INDEX_WIDTH-1:0] issued_rob_entry_index;
+    logic [3:0] issued_gen_op_type;
+    logic [4:0] issued_spec_op_type;
+    logic [25:0] issued_imm;
+    logic issued_imm_enable;
+    logic [`PREG_INDEX_WIDTH-1:0] issued_preg_rd;
+    logic [`PREG_INDEX_WIDTH-1:0] issued_preg_rj;
+    logic [`PREG_INDEX_WIDTH-1:0] issued_preg_rk;
+    logic issued_reg_rd_exist;
+    logic issued_reg_rj_exist;
+    logic issued_reg_rk_exist;
+} complex_issue_queue_issued_info_t;
+
+// LSU Issue Queue 单条指令信息结构体
+typedef struct packed {
+    logic [3:0] gen_op_type;
+    logic [4:0] spec_op_type;
+    logic store_or_load; // received from decode 1 means store 0 means load
+    logic [1:0] bar_type; // 00 -- normal , 01 -- dbar , 10 -- ibar
+    logic [25:0] imm;
+    logic imm_enable;
+    logic [4:0] arch_rd_index;
+    logic [`ROB_ENTRY_INDEX_WIDTH-1:0] rob_entry;
+    logic [`PREG_INDEX_WIDTH-1:0] preg_rd;
+    logic [`PREG_INDEX_WIDTH-1:0] preg_rj;
+    logic [`PREG_INDEX_WIDTH-1:0] preg_rk;
+    logic reg_rd_exist;
+    logic reg_rj_exist;
+    logic reg_rk_exist;
+    logic rj_ready;
+    logic rk_ready;
+    logic rd_ready;
+} lsu_single_instr_info_t;
+
+// LSU Issue Queue 输出结构体 - 只包含发射的指令信息
+typedef struct packed {
+    logic [3:0] issued_gen_op_type;
+    logic [4:0] issued_spec_op_type;
+    logic [25:0] issued_imm;
+    logic issued_imm_enable;
+    logic [`PREG_INDEX_WIDTH-1:0] issued_preg_rd;
+    logic [`PREG_INDEX_WIDTH-1:0] issued_preg_rj;
+    logic [`PREG_INDEX_WIDTH-1:0] issued_preg_rk;
+    logic issued_reg_rd_exist;
+    logic issued_reg_rj_exist;
+    logic issued_reg_rk_exist;
+    logic [`LSU_IQ_INDEX_WIDTH:0] issued_lsu_index; // for tracking the instr
+    logic [`ROB_ENTRY_INDEX_WIDTH-1:0] issued_rob_entry_index;
+    logic issued_store_or_load;
+    logic issued_bar_type;
+} lsu_issue_queue_issued_info_t;
 
 `define STORE_BUFFER_DEPTH 32
 `define STORE_BUFFER_INDEX_WIDTH 5
@@ -421,17 +546,28 @@ ROB 每个周期尽量多的按序退休指令，目前还没有写CSR的处理
 // 后面可能会考虑把SYSCALL_BREAK合并到CSR_INSTR中，因为CSR_INSTR中也会处理SYSCALL和BREAK指令（我希望可以这样处理）
 // 其他还有定义的很多例外，现在先不写了
 
+// ROB输入结构体定义
+// 单条指令的ROB输入信息结构体
 typedef struct packed {
-    logic [`ROB_MAINBODY_ENTRY_exception_width-1:0] exception;
-    logic completion;
+    logic [31:0] pc;
     logic [4:0] arch_rd_index;
     logic [`PREG_INDEX_WIDTH-1:0] preg_rd_index;
     logic [`PREG_INDEX_WIDTH-1:0] rd_history_index;
     logic rd_exist;
     logic [3:0] gen_op_type;
     logic [4:0] spec_op_type;
-    logic store_or_load; // 1 -- store ; 0 -- load
-} mainbody_entry_t;
+    logic [2:0] pred_BJ_type; // 0 表示普通分支指令, 1 表示B指令(相当于直接跳转) , 2 表示 BL (相当于JAL) , 3 表示 普通非调用间接跳转指令 , 4 表示 函数返回指令(JR $ra类似于)
+    logic [31:0] pred_BJ_jump_pc; // 预测的跳转PC
+    // 上面两个信号都是预测的
+    logic store_or_load;
+    logic [`ROB_MAINBODY_ENTRY_exception_width-1:0] exception; // decoder解码出来一些CSR会在这里设置出来exception
+    logic completion; // 每个周期写入的指令的完成情况
+} rob_single_instr_info_t;
+
+// ROB输入结构体数组
+typedef struct packed {
+    rob_single_instr_info_t instr [3:0];
+} rob_instr_info_t;
 
 typedef struct packed {
     logic [31:0] real_jump_pc;

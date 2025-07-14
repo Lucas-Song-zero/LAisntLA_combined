@@ -86,9 +86,9 @@ logic [`PREG_INDEX_WIDTH-1:0] temp_rd_history_preg_1;
 logic [`PREG_INDEX_WIDTH-1:0] temp_rd_history_preg_2;
 logic [`PREG_INDEX_WIDTH-1:0] temp_rd_history_preg_3;
 
-logic [`PREG_INDEX_WIDTH-1:0] rd_busy_table_read_index_vec [3:0],
-logic [`PREG_INDEX_WIDTH-1:0] rj_busy_table_read_index_vec [3:0],
-logic [`PREG_INDEX_WIDTH-1:0] rk_busy_table_read_index_vec [3:0],
+logic [`PREG_INDEX_WIDTH-1:0] rd_busy_table_read_index_vec [3:0];
+logic [`PREG_INDEX_WIDTH-1:0] rj_busy_table_read_index_vec [3:0];
+logic [`PREG_INDEX_WIDTH-1:0] rk_busy_table_read_index_vec [3:0];
 
 // 临时结构体数组用于内部计算
 rename_output_t temp_rename_output_vec [3:0];
@@ -285,12 +285,12 @@ always_comb begin
 end
 
 // 和忙表交互
-logic [3:0] rd_busy_table_readout_valid_vec,
-logic [3:0] rj_busy_table_readout_valid_vec,
+logic [3:0] rd_busy_table_readout_valid_vec;
+logic [3:0] rj_busy_table_readout_valid_vec;
 logic [3:0] rk_busy_table_readout_valid_vec;
 
 busy_table busy_table(
-    .clk(aclk),
+    .clk(clk),
     .rst_n(rst_n),
 
     .preg_rj_index_vec(rj_busy_table_read_index_vec),
