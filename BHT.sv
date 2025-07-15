@@ -112,12 +112,12 @@ end
 
 // Optional: Add debug signals for monitoring
 // synthesis translate_off
-initial begin
-    $display("BHT initialized with %d entries, %d-bit counters", `BHT_SIZE, `BHT_WIDTH);
-    $display("Prediction threshold: %d", (1 << (`BHT_WIDTH-1)));
-    $display("Reset value: %d", (1 << (`BHT_WIDTH-1)) - 1);
-    $display("Max counter value: %d", (1 << `BHT_WIDTH) - 1);
-end
+// initial begin
+//     $display("BHT initialized with %d entries, %d-bit counters", `BHT_SIZE, `BHT_WIDTH);
+//     $display("Prediction threshold: %d", (1 << (`BHT_WIDTH-1)));
+//     $display("Reset value: %d", (1 << (`BHT_WIDTH-1)) - 1);
+//     $display("Max counter value: %d", (1 << `BHT_WIDTH) - 1);
+// end
 // synthesis translate_on
 
 endmodule

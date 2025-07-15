@@ -66,10 +66,10 @@ module core_top
     output logic [31:0] rf_data, // 写状态数据
     
     output logic [31:0] debug0_wb_pc,
-    output logic [31:0] debug0_wb_rf_wen,
-    output logic [4:0] debug0_wb_rf_wnum,
-    output logic [31:0] debug0_wb_rf_wdata,
-    output logic [31:0] debug0_wb_inst
+    output logic [3:0] debug0_wb_rf_wen, // 写回字节数，一般都设置为4‘b1111
+    output logic[ 4:0] debug0_wb_rf_wnum, // 提交指令要写回的arch rd号
+    output logic [31:0] debug0_wb_rf_wdata, // 提交写回的数据，本质上就是把物理寄存器里面的值读出来
+    output logic [31:0] debug0_wb_inst // 提交指令的机器码，用于debug
 );
 logic rst_n;
 always_ff @(posedge aclk) begin
@@ -83,11 +83,22 @@ logic [31:0] pc_next_wire;
 logic stall_pc_update;
 assign stall_pc_update = !ifu_ready;
 // 这里假设初始化PC为 0x1C000000
-always_ff @(posedge aclk) begin
-    if (!rst_n) begin
+// always_ff @(posedge aclk) begin
+//     if (!rst_n) begin
+//         pc_reg <= 32'h1C000000;
+//     end else if(!stall_pc_update) begin
+//         pc_reg <= pc_next_wire;
+//     end
+// end
+
+// 这里可以先不考虑预测，先写一个简单的always pred no jump的逻辑
+assign taken_wire = 1'b0; // 默认不跳转
+assign cut_pos_wire = 2'b00; // 默认没有跳转分支指令
+always_ff @(posedge aclk or negedge rst_n) begin
+    if(!rst_n) begin
         pc_reg <= 32'h1C000000;
     end else if(!stall_pc_update) begin
-        pc_reg <= pc_next_wire;
+        pc_reg <= pc_reg + 16; // 每次取4条指令
     end
 end
 
@@ -97,25 +108,26 @@ logic [1:0] cut_pos_wire;
 logic prediction_valid_wire;
 logic flush_nlp;
 
-NLP nlp(
-    .clk(aclk),
-    .rst_n(rst_n),
-    .flush(flush_nlp),
+// 后面再来验证NLP可行性
+// NLP nlp(
+//     .clk(aclk),
+//     .rst_n(rst_n),
+//     .flush(flush_nlp),
 
-    .pc(pc_reg),
-    .next_fetch_pc(pc_next_wire),
-    .taken(taken_wire),
-    .cut_pos(cut_pos_wire),
-    .prediction_valid(prediction_valid_wire),
+//     .pc(pc_reg),
+//     .next_fetch_pc(pc_next_wire),
+//     .taken(taken_wire),
+//     .cut_pos(cut_pos_wire),
+//     .prediction_valid(prediction_valid_wire),
 
-    // 更新BHT和uBTB的逻辑
-    .update_valid(), // 先放在这里，最后统一处理
-    .update_pc(),
-    .target_pc(),
-    .update_taken(),
-    .update_cut_pos(),
-    .update_branch_type()
-);
+//     // 更新BHT和uBTB的逻辑
+//     .update_valid(), // 先放在这里，最后统一处理
+//     .update_pc(),
+//     .target_pc(),
+//     .update_taken(),
+//     .update_cut_pos(),
+//     .update_branch_type()
+// );
 
 logic flush_ifu;
 logic stall_ifu;
@@ -147,12 +159,17 @@ IFU ifu(
     .cut_pos_out(cut_pos_ifu_out),
     .pred_taken_out(pred_taken_ifu_out),
     .pred_jump_target_pc_out(pred_jump_target_pc_ifu_out),
-    .ifu_valid(ifu_valid)
+    .ifu_valid(ifu_valid),
+
+    // 从icache那边读取回来的4条指令
+    .fetched_instr_group(), // icache resp的一部分
+    .instr_out(fetched_instr) // 输出给decoder的指令
 );
 // IFU 要连接到icache上
 
+
 // 这里可以放一个icache top实例
-logic ifu_valid; // ifu取指回来了，可以输出给decoder
+logic ifu_valid; // ifu的最前面的指令需求取指回来了(valid=1)，可以输出给decoder
 logic [31:0] fetched_instr [3:0]; // 一次最多取四条指令
 logic [1:0] icache_resp_instr_num; // 一次取指的指令数量
 logic [3:0] fetch_valid; // 一次取指的指令四条中哪几条是有效的,应该一定是连续的1
@@ -404,13 +421,24 @@ logic lsu_fu_ready;
 simple_fu simple_fu_0(
     .clk(aclk),
     .rst_n(rst_n),
-    .issue_valid(simple_iq_0_issue_valid),
     .issued_info(simple_iq_0_issued_info),
-
+    .issue_valid(simple_iq_0_issue_valid),
     .fu_ready(simple_fu_0_ready),
-    .fu_valid(simple_fu_0_valid),
 
-    .fu_output_info(simple_fu_0_output_info)
+    .prf_read_rj_index(simple_fu_0_output_prf_read_rj_index),
+    .prf_read_rk_index(simple_fu_0_output_prf_read_rk_index),
+
+    .rj_val(simple_fu_0_prf_readback_rj_val),
+    .rk_val(simple_fu_0_prf_readback_rk_val),
+
+    .result(simple_fu_0_result),
+    .wb_rd_index(simple_fu_0_wb_rd_index),
+    .bj_taken(simple_fu_0_bj_taken),
+    .real_cut_pos(simple_fu_0_real_cut_pos),
+    .pred_wrong(simple_fu_0_pred_wrong),
+    .exception(simple_fu_0_exception),
+    .result_valid(simple_fu_0_result_valid),
+    .wb_rob_entry_index(simple_fu_0_wb_rob_entry_index)
 );
 
 simple_fu simple_fu_1(
@@ -512,8 +540,10 @@ ROB rob(
 
 );
 
-csr csr(
 
-);
+
+// csr csr(
+
+// );
 
 endmodule

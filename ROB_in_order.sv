@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 `include "mycpu.h"
 
-module ROB (
+module ROB_in_order (
     input clk,
     input rst_n,
     input flush,
@@ -10,7 +10,7 @@ module ROB (
     input logic [`ROB_ENTRY_INDEX_WIDTH-1:0] rob_entry_index_start, // the start index of incoming instr in the rob entry
     output logic alloc_success,
     // interface with rename
-    input rob_instr_info_t rob_instr_info, // 指令信息结构体数组
+    input rob_single_instr_info_t rob_instr_info [3:0], // 指令信息结构体数组
 
     // interface with issue and FU
     input logic [`ROB_ENTRY_INDEX_WIDTH-1:0] complete_entry_index_vec [3:0], // used to set corresponding entry completion bit to 1
@@ -54,18 +54,19 @@ module ROB (
     output logic CSR_exception_valid,
 
     // debug
-    input logic break_point, // 后面疑似暂时没用上，先放在这里
+    input           break_point, // 后面疑似暂时没用上，先放在这里
     // input           infor_flag, // 指示CPU把 reg_num 对应的物理寄存器内容写到 rf_data端口
     // input  [ 4:0]   reg_num,  // 选择要观察的arch 寄存器号
-    output logic ws_valid, // 真正提交了一条指令时把这个信号拉高一个周期，表示其他的debug采样信号也是正常的
+    output          ws_valid, // 真正提交了一条指令时把这个信号拉高一个周期，表示其他的debug采样信号也是正常的
     // output [31:0]   rf_rdata, // 要观察的arch寄存器实际的内容
 
-    output logic [31:0] debug0_wb_pc, // 提交的指令的PC
-    output logic [ 3:0] debug0_wb_rf_wen, // 写回数据的字节数，默认都是4'b1111，写回一个32bit数
-    output logic [ 4:0] debug0_wb_rf_wnum, // 提交指令要写回的arch rd号
-    output logic [`PREG_INDEX_WIDTH-1:0] rob_head_preg_rd_index_wire, // 要退休的rob第一条指令的rd_index，直接输入给PRF组合逻辑
-    // output logic [31:0] debug0_wb_rf_wdata, // 提交写回的数据，本质上就是把物理寄存器里面的值读出来
-    output logic [31:0] debug0_wb_inst // 提交指令的机器码，用于debug
+    output [31:0] debug0_wb_pc, // 提交的指令的PC
+    output [ 3:0] debug0_wb_rf_wen, // 写回数据的字节数，默认都是4'b1111，写回一个32bit数
+    output [`PREG_INDEX_WIDTH-1:0] temp_debug0_preg_rd_index, // 直接输出给PRF，然后PRF直接读出来 
+    output [ 4:0] debug0_wb_rf_wnum, // 提交指令要写回的arch rd号
+    // output [31:0] debug0_wb_rf_wdata, // 提交写回的数据，本质上就是把物理寄存器里面的值读出来
+    // 上面这个wdata要直接从prf中读取，从这里的
+    output [31:0] debug0_wb_inst // 提交指令的机器码，用于debug
 );
 
 mainbody_entry_t rob_mainbody [`ROB_DEPTH-1:0];
@@ -79,12 +80,15 @@ logic [`ROB_ENTRY_INDEX_WIDTH:0] filled_cnt; // 用来记录当前rob中已经�
 // 每个周期最多只能退休一条分支指令，最多只能退休一个store指令，因此要判断一下
 logic [3:0] branch_vec;
 logic [3:0] store_vec;
+logic [3:0] exception_mask; // 1表示正常，0表示这一位是例外
 logic [3:0] sec_branch_mask; // 1表示正常，0表示这一位是至少第二条分支指令
 logic [3:0] sec_store_mask; // 1表示正常，0表示这一位是至少第二条store指令
-logic [3:0] exception_mask; // 1表示正常，0表示这一位是例外
+logic [3:0] sec_exception_mask; // 1表示正常，0表示这一位是例外
 logic [3:0] ready_mask; // 1表示ready，0表示not ready
 logic [3:0] retire_mask; // 1表示可以退休，0表示不能退休
 logic [2:0] retire_num; // 表示可以退休的指令数量
+
+assign retire_num = (rob_mainbody[rob_head].completion)? 1 : 0;
 
 // 这一块需要完全的改变，原本的for + break语法是完全不能综合的
 // 现在需要的是对前四条指令进行并行判断，得到一些 logic bits
@@ -189,7 +193,6 @@ end
 assign retire_mask = ready_mask & sec_branch_mask & sec_store_mask & sec_exception_mask;
 assign retire_num = retire_mask[0] + retire_mask[1] + retire_mask[2] + retire_mask[3];
 
-
 // 然后是每个周期的写入，首先要根据写入的指令数量进行是否能分配空间的判断
 always_comb begin
     if(write_in_num + filled_cnt > `ROB_DEPTH) begin
@@ -227,6 +230,7 @@ always_ff @(posedge clk or negedge rst_n) begin
                     rob_mainbody[rob_tail + i].rd_exist <= rob_instr_info.instr[i].rd_exist;
                     BJ_jump_entry[rob_tail + i].BJ_type <= rob_instr_info.instr[i].pred_BJ_type;
                     BJ_jump_entry[rob_tail + i].real_jump_pc <= rob_instr_info.instr[i].pred_BJ_jump_pc;
+                    rob_mainbody[rob_tail + i].instr <= rob_instr_info.instr[i].instr;
                 end
             end
             // 退休
@@ -238,6 +242,12 @@ always_ff @(posedge clk or negedge rst_n) begin
 
             for(int i=0; i<4; i=i+1) begin
                 if(i < retire_num) begin
+                    // 提交指令，需要从rob_mainbody中取出指令信息
+                    debug0_wb_pc <= rob_mainbody[rob_head + i].pc;
+                    debug0_wb_rf_wen <= 4'b1111;
+                    debug0_wb_rf_wnum <= rob_mainbody[rob_head + i].arch_rd_index;
+                    debug0_wb_inst <= rob_mainbody[rob_head + i].instr;
+
                     // 所有指令都需要对aRAT和freelist进行更新
                     write_preg_valid_vec[i] <= rob_mainbody[rob_head + i].rd_exist;
                     // aRAT_write_arch_rd_index_vec[i] <= (rob_mainbody[rob_head + i].rd_exist) ? rob_mainbody[rob_head + i].arch_rd_index : 5'b0;

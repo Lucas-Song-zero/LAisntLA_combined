@@ -25,27 +25,12 @@ module simple_issue_queue(
     input logic [3:0] write_back_rd_exist_vec,
     input logic [`PREG_INDEX_WIDTH-1:0] write_back_rd_index_vec [3:0],
 
+    // 两个simple IQ之间的pre wake-up信息
+    input logic [1:0] pre_wakeup_valid,
+    input logic [`PREG_INDEX_WIDTH-1:0] pre_wakeup_rd_index_vec [1:0],
+
     // when issue is ready, give out some info to FU
     output simple_issue_queue_issued_info_t issued_info
-    // output logic [`ROB_ENTRY_INDEX_WIDTH-1:0] issued_rob_entry_index,
-    // output logic [3:0] issued_gen_op_type,
-    // output logic [4:0] issued_spec_op_type,
-    // output logic [25:0] issued_imm,
-    // output logic issued_imm_enable,
-    // output logic issued_imm_sign_extend,
-    // output logic [31:0] issued_pc,
-    // output logic [`PREG_INDEX_WIDTH-1:0] issued_preg_rd,
-    // output logic [`PREG_INDEX_WIDTH-1:0] issued_preg_rj,
-    // output logic [`PREG_INDEX_WIDTH-1:0] issued_preg_rk,
-    // output logic issued_reg_rd_exist,
-    // output logic issued_reg_rj_exist,
-    // output logic issued_reg_rk_exist,
-    // // used for PRF read-out
-    // output logic [31:0] issued_pred_jump_pc, // 预测的指令跳转pc
-    // output logic issued_pred_taken, // 预测这条指令是否taken
-    // output logic [1:0] issued_pred_cut_pos, // 预测的分支指令位置
-    // output logic [1:0] issued_instr_pos, // 实际发射指令在这个取指块中的位置
-    // output logic [31:0] issued_fetch_start_pc // 实际发射指令所在取指块的取指起始地址
 );
 
 // a compressed queue for maintaining the instr order
@@ -78,193 +63,256 @@ logic alloc_success;
 assign alloc_success = (filled_entry_cnt+rename_instr_num <= `IQ_DEPTH);
 assign issue_ready = alloc_success;
 
-// shadow变量定义
-SIMPLE_IQ_ENTRY_t next_simple_IQ_queue [`IQ_DEPTH-1:0];
-logic [25:0] next_imm_issue_queue [`IQ_DEPTH-1:0];
-logic [8:0] next_op_type_issue_queue [`IQ_DEPTH-1:0];
-logic [31:0] next_pc_issue_queue [`IQ_DEPTH-1:0];
-logic [31:0] next_pred_jump_pc_issue_queue [`IQ_DEPTH-1:0];
-logic [31:0] next_fetch_start_pc_issue_queue [`IQ_DEPTH-1:0];
-logic [`IQ_INDEX_WIDTH-1:0] next_filled_entry_cnt;
-logic [`PREG_INDEX_WIDTH-1:0] wb_rd_index;
+// 原本的shadow变量法是不能用的(纯是胡编乱造！)
+// 并且因为是压缩队列，所以这里反而可以实现比较简单的内部发射（and唤醒？）逻辑
+// 8个entry为一组，分成4组
+logic [3:0] high_level_ready_vec; // 表明四个大组(&*4=32)是否有ready的指令
+logic [7:0] low_level_ready_vec [3:0]; // 表明每个大组内部8个entry是否准备好
+logic [30:0] compress_recv_from_behind_en_vec; // 表明哪些entry需要向前写
+// 对应位的entry需要从后面一级接受数据 (从第一个entry到倒数第二个entry)
+logic [4:0] issue_pos; // 表明本周期需要发射的指令的位置
 
-always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
-        filled_entry_cnt <= 0;
-        for (int i = 0; i < `IQ_DEPTH; i++) begin
-            simple_IQ_queue[i] <= 0;
-            imm_issue_queue[i] <= 0;
-            op_type_issue_queue[i] <= 0;
-            pc_issue_queue[i] <= 0;
-            pred_jump_pc_issue_queue[i] <= 0;
-            fetch_start_pc_issue_queue[i] <= 0;
-
-            // outputs initialization
-            issue_valid <= 0;
-            issued_rob_entry_index <= 0;
-            issued_gen_op_type <= 0;
-            issued_spec_op_type <= 0;
-            issued_imm <= 0;
-            issued_pc <= 0;
-            issued_preg_rd <= 0;
-            issued_preg_rj <= 0;
-            issued_preg_rk <= 0;
-            issued_reg_rd_exist <= 0;
-            issued_reg_rj_exist <= 0;
-            issued_reg_rk_exist <= 0;
-            issued_pred_jump_pc <= 0;
-            issued_pred_taken <= 0;
-            issued_pred_cut_pos <= 0;
-            issued_instr_pos <= 0;
-            issued_fetch_start_pc <= 0;
+// entry 0~7 , 8~15 , 16~23 , 24~31
+// 使用genvar语句生成?
+// 使用genvar生成每组8个entry的ready判断逻辑
+genvar group;
+genvar entry;
+generate
+    for(group=0; group<4; group++) begin: ready_group
+        // 每组8个entry的ready判断
+        for(entry=0; entry<8; entry++) begin: ready_entry
+            assign low_level_ready_vec[group][entry] = 
+                (simple_IQ_queue[group*8 + entry].issued == 1'b0) &&
+                (simple_IQ_queue[group*8 + entry].rj_ready || !simple_IQ_queue[group*8 + entry].rj_valid) &&
+                (simple_IQ_queue[group*8 + entry].rk_ready || !simple_IQ_queue[group*8 + entry].rk_valid);
         end
-    end else begin
-        // 1. 先拷贝原队列到shadow变量
-        for (int i = 0; i < `IQ_DEPTH; i++) begin
-            next_simple_IQ_queue[i] = simple_IQ_queue[i];
-            next_imm_issue_queue[i] = imm_issue_queue[i];
-            next_op_type_issue_queue[i] = op_type_issue_queue[i];
-            next_pc_issue_queue[i] = pc_issue_queue[i];
-            next_pred_jump_pc_issue_queue[i] = pred_jump_pc_issue_queue[i];
-            next_fetch_start_pc_issue_queue[i] = fetch_start_pc_issue_queue[i];
-        end
-        next_filled_entry_cnt = filled_entry_cnt;
-
-        // 2. 发射+pre-wakeup+compress
-        if (fu_ready && !IQ_empty) begin
-            for(int i=0; i<`IQ_DEPTH; i++) begin
-                if(next_simple_IQ_queue[i].issued == 1'b0
-                && (next_simple_IQ_queue[i].rj_ready || !next_simple_IQ_queue[i].rj_valid)
-                && (next_simple_IQ_queue[i].rk_ready || !next_simple_IQ_queue[i].rk_valid)
-                ) begin
-                    // issue this instr
-                    issue_valid <= 1'b1; // 发射信号拉高
-                    issued_rob_entry_index <= next_simple_IQ_queue[i].rob_entry_index;
-                    issued_gen_op_type <= next_op_type_issue_queue[i][8:5];
-                    issued_spec_op_type <= next_op_type_issue_queue[i][4:0];
-                    issued_imm <= next_imm_issue_queue[i];
-                    issued_pc <= next_pc_issue_queue[i];
-                    issued_preg_rd <= next_simple_IQ_queue[i].rd_index;
-                    issued_preg_rj <= next_simple_IQ_queue[i].rj_index;
-                    issued_preg_rk <= next_simple_IQ_queue[i].rk_index;
-                    issued_reg_rd_exist <= next_simple_IQ_queue[i].rd_valid;
-                    issued_reg_rj_exist <= next_simple_IQ_queue[i].rj_valid;
-                    issued_reg_rk_exist <= next_simple_IQ_queue[i].rk_valid;
-                    issued_pred_taken <= next_simple_IQ_queue[i].pred_taken;
-                    issued_pred_jump_pc <= next_pred_jump_pc_issue_queue[i];
-                    issued_fetch_start_pc <= next_fetch_start_pc_issue_queue[i];
-                    issued_pred_cut_pos <= next_simple_IQ_queue[i].pred_cut_pos;
-                    issued_instr_pos <= next_simple_IQ_queue[i].instr_pos;
-                    // pre-wakeup (只操作shadow)
-                    for(int k=0; k<`IQ_DEPTH; k++) begin
-                        if(next_simple_IQ_queue[k].rj_index == next_simple_IQ_queue[i].rd_index) begin
-                            next_simple_IQ_queue[k].rj_ready = 1'b1;
-                        end else if(next_simple_IQ_queue[k].rk_index == next_simple_IQ_queue[i].rd_index) begin
-                            next_simple_IQ_queue[k].rk_ready = 1'b1;
-                        end
-                    end
-                    // compress (只操作shadow)
-                    for(int j=i+1; j<`IQ_DEPTH; j++) begin
-                        next_simple_IQ_queue[j-1] = next_simple_IQ_queue[j];
-                        next_imm_issue_queue[j-1] = next_imm_issue_queue[j];
-                        next_op_type_issue_queue[j-1] = next_op_type_issue_queue[j];
-                        next_pc_issue_queue[j-1] = next_pc_issue_queue[j];
-                        next_pred_jump_pc_issue_queue[j-1] = next_pred_jump_pc_issue_queue[j];
-                        next_fetch_start_pc_issue_queue[j-1] = next_fetch_start_pc_issue_queue[j];
-                    end
-                    // 清空最后一项 (not necessary)
-                    // next_preg_issue_queue[next_filled_entry_cnt-1] = 0;
-                    // next_imm_issue_queue[next_filled_entry_cnt-1] = 0;
-                    // next_op_type_issue_queue[next_filled_entry_cnt-1] = 0;
-                    next_filled_entry_cnt = next_filled_entry_cnt - 1;
-
-                    // 写入新指令（如果有）
-                    if (rename_valid && !IQ_full && alloc_success) begin
-                        for(int x=0; x<4; x=x+1) begin
-                            if(x < rename_instr_num) begin
-                                                     next_simple_IQ_queue[next_filled_entry_cnt].rob_entry_index = instr_info[x].rob_entry;
-                     next_simple_IQ_queue[next_filled_entry_cnt].rj_index = instr_info[x].preg_rj;
-                     next_simple_IQ_queue[next_filled_entry_cnt].rj_valid = instr_info[x].reg_rj_exist;
-                     next_simple_IQ_queue[next_filled_entry_cnt].rj_ready = instr_info[x].rj_ready;
-                     next_simple_IQ_queue[next_filled_entry_cnt].rk_index = instr_info[x].preg_rk;
-                     next_simple_IQ_queue[next_filled_entry_cnt].rk_valid = instr_info[x].reg_rk_exist;
-                     next_simple_IQ_queue[next_filled_entry_cnt].rk_ready = instr_info[x].rk_ready;
-                     next_simple_IQ_queue[next_filled_entry_cnt].rd_index = instr_info[x].preg_rd;
-                     next_simple_IQ_queue[next_filled_entry_cnt].rd_valid = instr_info[x].reg_rd_exist;
-                     next_simple_IQ_queue[next_filled_entry_cnt].imm_enable = instr_info[x].imm_enable;
-                     next_simple_IQ_queue[next_filled_entry_cnt].issued = 1'b0;
-                     next_pred_jump_pc_issue_queue[next_filled_entry_cnt] = instr_info[x].pred_jump_pc;
-                     next_simple_IQ_queue[next_filled_entry_cnt].pred_taken = instr_info[x].pred_taken;
-                     
-                     next_imm_issue_queue[next_filled_entry_cnt] = instr_info[x].imm;
-                     next_op_type_issue_queue[next_filled_entry_cnt] = {instr_info[x].gen_op_type, instr_info[x].spec_op_type};
-                     next_pc_issue_queue[next_filled_entry_cnt] = instr_info[x].pc;
-                     next_fetch_start_pc_issue_queue[next_filled_entry_cnt] = instr_info[x].fetch_start_pc;
-                     next_simple_IQ_queue[next_filled_entry_cnt].pred_cut_pos = instr_info[x].pred_cut_pos;
-                     next_simple_IQ_queue[next_filled_entry_cnt].instr_pos = instr_info[x].instr_pos;
-                                next_filled_entry_cnt = next_filled_entry_cnt + 1;
-                            end
-                        end
-                    end
-                    // break
-                    break;
-                end
-            end
-        end
-        // no issued instr , simply write in one instr
-        if (rename_valid && !IQ_full && alloc_success) begin
-            for(int x=0; x<4; x=x+1) begin
-                if(x < rename_instr_num) begin
-                                         next_simple_IQ_queue[next_filled_entry_cnt].rob_entry_index = instr_info[x].rob_entry;
-                     next_simple_IQ_queue[next_filled_entry_cnt].rj_index = instr_info[x].preg_rj;
-                     next_simple_IQ_queue[next_filled_entry_cnt].rj_valid = instr_info[x].reg_rj_exist;
-                     next_simple_IQ_queue[next_filled_entry_cnt].rj_ready = instr_info[x].rj_ready;
-                     next_simple_IQ_queue[next_filled_entry_cnt].rk_index = instr_info[x].preg_rk;
-                     next_simple_IQ_queue[next_filled_entry_cnt].rk_valid = instr_info[x].reg_rk_exist;
-                     next_simple_IQ_queue[next_filled_entry_cnt].rk_ready = instr_info[x].rk_ready;
-                     next_simple_IQ_queue[next_filled_entry_cnt].rd_index = instr_info[x].preg_rd;
-                     next_simple_IQ_queue[next_filled_entry_cnt].rd_valid = instr_info[x].reg_rd_exist;
-                     next_simple_IQ_queue[next_filled_entry_cnt].imm_enable = instr_info[x].imm_enable;
-                     next_simple_IQ_queue[next_filled_entry_cnt].issued = 1'b0;
-                     next_pred_jump_pc_issue_queue[next_filled_entry_cnt] = instr_info[x].pred_jump_pc;
-                     next_simple_IQ_queue[next_filled_entry_cnt].pred_taken = instr_info[x].pred_taken;
-
-                     next_imm_issue_queue[next_filled_entry_cnt] = instr_info[x].imm;
-                     next_op_type_issue_queue[next_filled_entry_cnt] = {instr_info[x].gen_op_type, instr_info[x].spec_op_type};
-                     next_pc_issue_queue[next_filled_entry_cnt] = instr_info[x].pc;
-                    next_filled_entry_cnt = next_filled_entry_cnt + 1;
-                end
-            end
-        end
-        // 外部wake-up（只操作shadow）
-        for(int i=0; i<4; i++) begin
-            case(i)
-                0: wb_rd_index = write_back_rd_index_0;
-                1: wb_rd_index = write_back_rd_index_1;
-                2: wb_rd_index = write_back_rd_index_2;
-                3: wb_rd_index = write_back_rd_index_3;
-            endcase
-            if(write_back_rd_exist_vec[i]) begin
-                for(int j=0; j<`IQ_DEPTH; j++) begin
-                    if(next_simple_IQ_queue[j].rj_index == wb_rd_index) begin
-                        next_simple_IQ_queue[j].rj_ready = 1'b1;
-                    end else if(next_simple_IQ_queue[j].rk_index == wb_rd_index) begin
-                        next_simple_IQ_queue[j].rk_ready = 1'b1;
-                    end
-                end
-            end
-        end
-        // 最后统一赋值
-        for (int i = 0; i < `IQ_DEPTH; i++) begin
-            simple_IQ_queue[i] <= next_simple_IQ_queue[i];
-            imm_issue_queue[i] <= next_imm_issue_queue[i];
-            op_type_issue_queue[i] <= next_op_type_issue_queue[i];
-            pc_issue_queue[i] <= next_pc_issue_queue[i];
-            pred_jump_pc_issue_queue[i] <= next_pred_jump_pc_issue_queue[i];
-            fetch_start_pc_issue_queue[i] <= next_fetch_start_pc_issue_queue[i];
-        end
-        filled_entry_cnt <= next_filled_entry_cnt;
+        
+        // 每组是否有ready的指令
+        assign high_level_ready_vec[group] = |low_level_ready_vec[group];
     end
+endgenerate
+
+// 生成压缩使能信号以及发射位置信号
+always_comb begin
+    casez (high_level_ready_vec)
+        4'b0000: begin
+            // 没有发射的指令
+            compress_recv_from_behind_en_vec = 31'b0;
+            issue_pos = 5'b0;
+        end
+        4'b???1: begin
+            // 第一大组有发射的
+            compress_recv_from_behind_en_vec[30:8] = 23'b1;
+            casez (low_level_ready_vec[0])
+                8'b???????1: begin
+                    compress_recv_from_behind_en_vec[7:0] = 8'b1111_1111;
+                    issue_pos = 5'd0;
+                end
+                8'b??????10: begin
+                    compress_recv_from_behind_en_vec[15:8] = 8'b1111_1110;
+                    issue_pos = 5'd1;
+                end
+                8'b?????100: begin
+                    compress_recv_from_behind_en_vec[23:16] = 8'b1111_1100;
+                    issue_pos = 5'd2;
+                end
+                8'b????1000: begin
+                    compress_recv_from_behind_en_vec[31:24] = 8'b1111_1000;
+                    issue_pos = 5'd3;
+                end
+                8'b???10000: begin
+                    compress_recv_from_behind_en_vec[31:24] = 8'b1111_0000;
+                    issue_pos = 5'd4;
+                end
+                8'b??100000: begin
+                    compress_recv_from_behind_en_vec[31:24] = 8'b1110_0000;
+                    issue_pos = 5'd5;
+                end
+                8'b?1000000: begin
+                    compress_recv_from_behind_en_vec[31:24] = 8'b1100_0000;
+                    issue_pos = 5'd6;
+                end
+                8'b10000000: begin
+                    compress_recv_from_behind_en_vec[31:24] = 8'b1000_0000;
+                    issue_pos = 5'd7;
+                end
+            endcase
+        end
+        4'b??10: begin
+            // 第二大组有发射的
+            compress_recv_from_behind_en_vec[30:16] = 15'b1;
+            compress_recv_from_behind_en_vec[7:0] = 8'b0;
+            casez (low_level_ready_vec[1])
+                8'b???????1: begin
+                    compress_recv_from_behind_en_vec[15:8] = 8'b1111_1111;
+                    issue_pos = 5'd8;
+                end
+                8'b??????10: begin
+                    compress_recv_from_behind_en_vec[15:8] = 8'b1111_1110;
+                    issue_pos = 5'd9;
+                end
+                8'b?????100: begin
+                    compress_recv_from_behind_en_vec[15:8] = 8'b1111_1100;
+                    issue_pos = 5'd10;
+                end
+                8'b????1000: begin
+                    compress_recv_from_behind_en_vec[15:8] = 8'b1111_1000;
+                    issue_pos = 5'd11;
+                end
+                8'b???10000: begin
+                    compress_recv_from_behind_en_vec[15:8] = 8'b1111_0000;
+                    issue_pos = 5'd12;
+                end
+                8'b??100000: begin
+                    compress_recv_from_behind_en_vec[15:8] = 8'b1110_0000;
+                    issue_pos = 5'd13;
+                end
+                8'b?1000000: begin
+                    compress_recv_from_behind_en_vec[15:8] = 8'b1100_0000;
+                    issue_pos = 5'd14;
+                end
+                8'b10000000: begin
+                    compress_recv_from_behind_en_vec[15:8] = 8'b1000_0000;
+                    issue_pos = 5'd15;
+                end
+            endcase
+        end
+        4'b?100: begin
+            // 第三大组有发射的
+            compress_recv_from_behind_en_vec[30:24] = 7'b1;
+            compress_recv_from_behind_en_vec[15:0] = 16'b0;
+            casez (low_level_ready_vec[2])
+                8'b???????1: begin
+                    compress_recv_from_behind_en_vec[23:16] = 8'b1111_1111;
+                    issue_pos = 5'd16;
+                end
+                8'b??????10: begin
+                    compress_recv_from_behind_en_vec[23:16] = 8'b1111_1110;
+                    issue_pos = 5'd17;
+                end
+                8'b?????100: begin
+                    compress_recv_from_behind_en_vec[23:16] = 8'b1111_1100;
+                    issue_pos = 5'd18;
+                end
+                8'b????1000: begin
+                    compress_recv_from_behind_en_vec[23:16] = 8'b1111_1000;
+                    issue_pos = 5'd19;
+                end
+                8'b???10000: begin
+                    compress_recv_from_behind_en_vec[23:16] = 8'b1111_0000;
+                    issue_pos = 5'd20;
+                end
+                8'b??100000: begin
+                    compress_recv_from_behind_en_vec[23:16] = 8'b1110_0000;
+                    issue_pos = 5'd21;
+                end
+                8'b?1000000: begin
+                    compress_recv_from_behind_en_vec[23:16] = 8'b1100_0000;
+                    issue_pos = 5'd22;
+                end
+                8'b10000000: begin
+                    compress_recv_from_behind_en_vec[23:16] = 8'b1000_0000;
+                    issue_pos = 5'd23;
+                end
+            endcase
+        end
+        4'b1000: begin
+            // 第四大组有发射的
+            // 前面都没有ready，直接看最后一组
+            compress_recv_from_behind_en_vec[23:0] = 24'b0;
+            casez (low_level_ready_vec[3])
+                8'b???????1: begin
+                    compress_recv_from_behind_en_vec[30:24] = 7'b111_1111;
+                    issue_pos = 5'd24;
+                end
+                8'b??????10: begin
+                    compress_recv_from_behind_en_vec[31:24] = 7'b111_1110;
+                    issue_pos = 5'd25;
+                end
+                8'b?????100: begin
+                    compress_recv_from_behind_en_vec[31:24] = 8'b111_1100;
+                    issue_pos = 5'd26;
+                end
+                8'b????1000: begin
+                    compress_recv_from_behind_en_vec[31:24] = 8'b111_1000;
+                    issue_pos = 5'd27;
+                end
+                8'b???10000: begin
+                    compress_recv_from_behind_en_vec[31:24] = 8'b111_0000;
+                    issue_pos = 5'd28;
+                end
+                8'b??100000: begin
+                    compress_recv_from_behind_en_vec[31:24] = 8'b110_0000;
+                    issue_pos = 5'd29;
+                end
+                8'b?1000000: begin
+                    compress_recv_from_behind_en_vec[31:24] = 8'b100_0000;
+                    issue_pos = 5'd30;
+                end
+                8'b10000000: begin
+                    compress_recv_from_behind_en_vec[31:24] = 8'b000_0000;
+                    issue_pos = 5'd31;
+                end
+            endcase
+        end
+    endcase
+end
+
+// 这里需要做wake up的并行比较
+logic [31:0] wakeup_rj_vec;
+logic [31:0] wakeup_rk_vec;
+// 下面先进行rj,rk和输入写回寄存器号的比较
+always_comb begin
+    for(int i=0; i<32; i=i+1) begin
+        wakeup_rj_vec[i] = 1'b0;
+        wakeup_rk_vec[i] = 1'b0;
+        if(simple_IQ_queue[i].rj_valid) begin
+            // 比较write_back端口
+            for(int j=0; j<4; j=j+1) begin
+                if(write_back_rd_exist_vec[j] && (simple_IQ_queue[i].rj_index == write_back_rd_index_vec[j])) begin
+                    wakeup_rj_vec[i] = 1'b1;
+                end
+            end
+            // 比较pre_wakeup端口
+            for(int k=0; k<2; k=k+1) begin
+                if(pre_wakeup_rd_index_vec[k] && (simple_IQ_queue[i].rj_index == pre_wakeup_rd_index_vec[k])) begin
+                    wakeup_rj_vec[i] = 1'b1;
+                end
+            end
+        end
+
+        // 同样对rk进行比较
+        if(simple_IQ_queue[i].rk_valid) begin
+            for(int j=0; j<4; j=j+1) begin
+                if(write_back_rd_exist_vec[j] && (simple_IQ_queue[i].rk_index == write_back_rd_index_vec[j])) begin
+                    wakeup_rk_vec[i] = 1'b1;
+                end
+            end
+            for(int k=0; k<2; k=k+1) begin
+                if(pre_wakeup_rd_index_vec[k] && (simple_IQ_queue[i].rk_index == pre_wakeup_rd_index_vec[k])) begin
+                    wakeup_rk_vec[i] = 1'b1;
+                end
+            end
+        end
+    end
+end
+// 这样每个entry是否要唤醒已经计算出来了
+
+// 下面进行发射以及内部的压缩
+always_ff @(posedge clk or negedge rst_n) begin
+    if(!rst_n || flush) begin
+        // 清空队列
+        for(int i=0; i<32; i=i+1) begin
+            simple_IQ_queue[i].issued <= 1'b0;
+            simple_IQ_queue[i].rj_ready <= 1'b0;
+            simple_IQ_queue[i].rk_ready <= 1'b0;
+            simple_IQ_queue[i].rj_valid <= 1'b0;
+            simple_IQ_queue[i].rk_valid <= 1'b0;
+        end
+        filled_entry_cnt <= 0;
+    end
+    // 这里我们的提前唤醒就是很正常的了
+    
 end
 
 endmodule

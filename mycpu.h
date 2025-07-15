@@ -43,8 +43,14 @@ IFU(IFU包含了Instr Fetch Buffer和执行取指的IFU)
 
 // IFB entry definition
 typedef struct packed {
+    logic taken; // 表示这个表项是否被占用
+    logic valid; // 表示这个表项对应的指令是否被取回来了
     logic [31:0] fetch_pc;
     logic [1:0] cut_pos;
+    logic pred_taken;
+    logic [31:0] pred_jump_target_pc;
+    logic [31:0] fetched_instr_group [3:0]; // 从icache读取回来4条指令
+    logic issued; // 取指请求被发射出去了的标识
 } IFB_ENTRY_t;
 
 /////////////////////////////////////////////
@@ -562,12 +568,8 @@ typedef struct packed {
     logic store_or_load;
     logic [`ROB_MAINBODY_ENTRY_exception_width-1:0] exception; // decoder解码出来一些CSR会在这里设置出来exception
     logic completion; // 每个周期写入的指令的完成情况
+    logic [31:0] instr; // 指令的机器码，用于debug
 } rob_single_instr_info_t;
-
-// ROB输入结构体数组
-typedef struct packed {
-    rob_single_instr_info_t instr [3:0];
-} rob_instr_info_t;
 
 typedef struct packed {
     logic [31:0] real_jump_pc;
