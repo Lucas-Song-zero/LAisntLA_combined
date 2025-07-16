@@ -20,7 +20,8 @@ module complex_fu (
     output logic [31:0] result,
     output logic [`PREG_INDEX_WIDTH-1:0] wb_rd_index,
     output logic [`ROB_ENTRY_INDEX_WIDTH-1:0] wb_rob_entry_index,
-    output logic result_valid
+    output logic result_valid,
+    output logic preg_rd_exist
 );
 
 // 流水线寄存器，用于存储指令信息

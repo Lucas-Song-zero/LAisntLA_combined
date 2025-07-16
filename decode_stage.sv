@@ -12,7 +12,7 @@ module decoder_stage (
     input logic [31:0] instr_1,      // Instruction 1 from fetch
     input logic [31:0] instr_2,      // Instruction 2 from fetch
     input logic [31:0] instr_3,      // Instruction 3 from fetch
-    input logic [3:0] fetch_valid,   // Valid signals for each instruction
+    input logic [3:0] instr_valid,   // Valid signals for each instruction
     output logic decoder_ready,      // Decoder stage ready signal to fetch
     input logic [31:0] start_pc_in,     // 取指开始的pc
     output logic [31:0] start_pc_out,
@@ -80,7 +80,7 @@ always_ff @(posedge clk or negedge rst_n) begin
         decoder_valid <= 1'b0;
     end else begin
         if (ifu_valid && !pred_wrong) begin
-            decoded_instr_valid <= fetch_valid;
+            decoded_instr_valid <= instr_valid;
             decoder_valid <= 1'b1;
         end else begin
             decoded_instr_valid <= 4'b0000;
@@ -235,7 +235,7 @@ always_ff @(posedge clk or negedge rst_n) begin
             // Process each instruction slot independently
             for (int i = 0; i < 4; i = i + 1) begin
                 // Only process if fetch has valid instruction and decoder slot is not busy
-                if (fetch_valid[i]) begin
+                if (instr_valid[i]) begin
                     // Assign decoded outputs directly using array indexing
                     decoded_instrs[i].gen_op_type <= decoder_gen_op_type[i];
                     decoded_instrs[i].spec_op_type <= decoder_spec_op_type[i];

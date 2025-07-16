@@ -10,11 +10,12 @@ module IFU(
     input logic [1:0] cut_pos,
     input logic pred_taken_in,
     input logic [31:0] pred_jump_target_pc_in,
-    input logic input_pc_valid,
+    input logic input_valid,
     input logic icache_ready, // Icache准备好取指
     output logic ifu_ready, // IFU准备好接收inserting取指请求
     // 这里写一个icache的req类型信号
     // 包含了fetch_req_valid ... etc
+    // 需要结合icache接口设计具体内容
 
     output logic [31:0] fetch_pc_out,
     output logic [1:0] cut_pos_out, // 00 -- 取四条指令, 01 -- 取一条指令, 10 -- 取两条指令, 11 -- 取三条指令
@@ -25,6 +26,7 @@ module IFU(
     // 从icache读取回来4条指令
     input logic [31:0] fetched_instr_group [3:0],
     input logic [`IFB_ENTRY_WIDTH-1:0] fetched_entry_index_back,
+    input logic fetched_instr_valid, // 表示icache取到指令了，写回是有效的
     output logic [31:0] instr_out [3:0]
 );
 
@@ -39,23 +41,33 @@ logic [`IFB_ENTRY_WIDTH-1:0] to_issue_entry_index; // 表示哪个表项可以�
 logic [`IFB_ENTRY_WIDTH-1:0] temp_entry_index; // 只是中间变量
 logic to_issue; // 表明可以issue了
 
+logic [7:0] low_level_can_be_issued_vec [3:0];
+logic [3:0] high_level_can_be_issued_vec;
+
+genvar j, i;
+generate
+    for (j = 0; j < 4; j = j + 1) begin : gen_low_level_vec
+        for (i = 0; i < 8; i = i + 1) begin : gen_low_level_bit
+            assign low_level_can_be_issued_vec[j][i] = IFB[8*j + i].taken && !IFB[8*j + i].issued && !IFB[8*j + i].valid;
+        end
+    end
+endgenerate
+
+genvar j;
+generate
+    for (j = 0; j < 4; j = j + 1) begin : gen_high_level_vec
+        assign high_level_can_be_issued_vec[j] = |low_level_can_be_issued_vec[j];
+    end
+endgenerate
+
+
+
+
 always_comb begin
     fetch_req_valid = 1'b0;
     to_issue = 1'b0;
-    // if(filled_entry_num != 0) begin
-    //     fetch_req_valid = 1'b1;
-    // end else begin
-    //     fetch_req_valid = 1'b0;
-    // end
-    for(int i=0; i<`IFB_DEPTH; i++) begin
-        temp_entry_index = (IFB_head_ptr + i) % `IFB_DEPTH;
-        if(IFB[temp_entry_index].taken && !IFB[temp_entry_index].issued) begin
-            to_issue_entry_index = temp_entry_index;
-            to_issue = 1'b1;
-            fetch_req_valid = 1'b1;
-            break;
-        end
-    end
+    
+    
     if(filled_entry_num == `IFB_DEPTH) begin
         ifu_ready = 1'b0;
     end else begin
@@ -84,7 +96,7 @@ always_ff @(posedge clk or negedge rst_n) begin
             instr_out <= IFB[IFB_head_ptr].fetched_instr_group;
 
             IFB_head_ptr <= IFB_head_ptr + 1;
-            if(input_pc_valid && ifu_ready) begin
+            if(input_valid && ifu_ready) begin
                 IFB[IFB_tail_ptr].fetch_pc <= fetch_pc;
                 IFB[IFB_tail_ptr].cut_pos <= cut_pos;
                 IFB[IFB_tail_ptr].pred_taken <= 1'b1;
@@ -100,7 +112,7 @@ always_ff @(posedge clk or negedge rst_n) begin
                 filled_entry_num <= filled_entry_num - 1;
             end
         end else begin
-            if(input_pc_valid && ifu_ready) begin
+            if(input_valid && ifu_ready) begin
                 IFB[IFB_tail_ptr].fetch_pc <= fetch_pc;
                 IFB[IFB_tail_ptr].cut_pos <= cut_pos;
                 IFB[IFB_tail_ptr].pred_taken <= 1'b1;

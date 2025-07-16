@@ -21,3 +21,9 @@ logic [3:0] bar_type_vec [1:0] 是2个4bit数组
 arch_rd_0永远都只能映射到PRF preg_0
 
 # FU写回忙表的端口好像还没给？可能需要增加一下
+
+# IFU有个发射判断需要改一下（必须要改且很急）
+
+# Decoder那一块的valid信号现在比较混乱，需要重新看一遍整理一下
+
+# 需要检查一下rename input和decoder output之间有什么区别，如果没有区别就可以直接复制过去（）

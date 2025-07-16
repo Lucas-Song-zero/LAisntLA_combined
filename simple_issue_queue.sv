@@ -71,6 +71,9 @@ logic [7:0] low_level_ready_vec [3:0]; // 表明每个大组内部8个entry是�
 logic [30:0] compress_recv_from_behind_en_vec; // 表明哪些entry需要向前写
 // 对应位的entry需要从后面一级接受数据 (从第一个entry到倒数第二个entry)
 logic [4:0] issue_pos; // 表明本周期需要发射的指令的位置
+logic can_issue; // 表明本周期是否可以发射
+
+assign can_issue = |high_level_ready_vec; // 只要四个大组中有至少一个大组有可以发射的指令就行
 
 // entry 0~7 , 8~15 , 16~23 , 24~31
 // 使用genvar语句生成?
@@ -259,13 +262,15 @@ always_comb begin
 end
 
 // 这里需要做wake up的并行比较
+// 为了方便，这里直接设计成如果已经wake up就直接置此位为1
+// 这样可以大大方便后面的压缩逻辑，不需要同时考虑新wake up和旧wake up在压缩中可能的冲突了
 logic [31:0] wakeup_rj_vec;
 logic [31:0] wakeup_rk_vec;
 // 下面先进行rj,rk和输入写回寄存器号的比较
 always_comb begin
     for(int i=0; i<32; i=i+1) begin
-        wakeup_rj_vec[i] = 1'b0;
-        wakeup_rk_vec[i] = 1'b0;
+        wakeup_rj_vec[i] = simple_IQ_queue[i].rj_ready;
+        wakeup_rk_vec[i] = simple_IQ_queue[i].rk_ready;
         if(simple_IQ_queue[i].rj_valid) begin
             // 比较write_back端口
             for(int j=0; j<4; j=j+1) begin
@@ -273,9 +278,8 @@ always_comb begin
                     wakeup_rj_vec[i] = 1'b1;
                 end
             end
-            // 比较pre_wakeup端口
             for(int k=0; k<2; k=k+1) begin
-                if(pre_wakeup_rd_index_vec[k] && (simple_IQ_queue[i].rj_index == pre_wakeup_rd_index_vec[k])) begin
+                if(pre_wakeup_valid[k] && (simple_IQ_queue[i].rj_index == pre_wakeup_rd_index_vec[k])) begin
                     wakeup_rj_vec[i] = 1'b1;
                 end
             end
@@ -311,7 +315,63 @@ always_ff @(posedge clk or negedge rst_n) begin
         end
         filled_entry_cnt <= 0;
     end
-    // 这里我们的提前唤醒就是很正常的了
+    // 下面进行发射，之前已经把issue pos 找出来了
+    if(can_issue && issue_ready) begin
+        issued_info.issued_rob_entry_index <= simple_IQ_queue[issue_pos].rob_entry_index;
+        issued_info.issued_gen_op_type <= simple_IQ_queue[issue_pos].gen_op_type;
+        issued_info.issued_spec_op_type <= simple_IQ_queue[issue_pos].spec_op_type;
+        issued_info.issued_imm <= simple_IQ_queue[issue_pos].imm;
+        issued_info.issued_imm_enable <= simple_IQ_queue[issue_pos].imm_enable;
+        issued_info.issued_imm_sign_extend <= simple_IQ_queue[issue_pos].imm_sign_extend;
+        issued_info.issued_pc <= simple_IQ_queue[issue_pos].pc;
+        issued_info.issued_preg_rd <= simple_IQ_queue[issue_pos].preg_rd;
+        issued_info.issued_preg_rj <= simple_IQ_queue[issue_pos].preg_rj;
+        issued_info.issued_preg_rk <= simple_IQ_queue[issue_pos].preg_rk;
+        issued_info.issued_reg_rd_exist <= simple_IQ_queue[issue_pos].reg_rd_exist;
+        issued_info.issued_reg_rj_exist <= simple_IQ_queue[issue_pos].reg_rj_exist;
+        issued_info.issued_reg_rk_exist <= simple_IQ_queue[issue_pos].reg_rk_exist;
+        issued_info.issued_pred_jump_pc <= simple_IQ_queue[issue_pos].pred_jump_pc;
+        issued_info.issued_pred_taken <= simple_IQ_queue[issue_pos].pred_taken;
+        issued_info.issued_pred_cut_pos <= simple_IQ_queue[issue_pos].pred_cut_pos;
+        issued_info.issued_instr_pos <= simple_IQ_queue[issue_pos].instr_pos;
+        issued_info.issued_fetch_start_pc <= simple_IQ_queue[issue_pos].fetch_start_pc;
+        issue_valid <= 1'b1; // 发射有效,simple FU可以接收
+
+        // 并行的进行压缩
+        for(int i=0; i<31; i=i+1) begin
+            // 因为compress_recv_from_behind_en_vec是31位，所以i<31
+            if(compress_recv_from_behind_en_vec[i]) begin
+                simple_IQ_queue[i].rob_entry_index <= simple_IQ_queue[i+1].rob_entry_index;
+                simple_IQ_queue[i].gen_op_type <= simple_IQ_queue[i+1].gen_op_type;
+                simple_IQ_queue[i].spec_op_type <= simple_IQ_queue[i+1].spec_op_type;
+                simple_IQ_queue[i].imm <= simple_IQ_queue[i+1].imm;
+                simple_IQ_queue[i].imm_enable <= simple_IQ_queue[i+1].imm_enable;
+                simple_IQ_queue[i].imm_sign_extend <= simple_IQ_queue[i+1].imm_sign_extend;
+                simple_IQ_queue[i].preg_rd <= simple_IQ_queue[i+1].preg_rd;
+                simple_IQ_queue[i].preg_rj <= simple_IQ_queue[i+1].preg_rj;
+                simple_IQ_queue[i].preg_rk <= simple_IQ_queue[i+1].preg_rk;
+                simple_IQ_queue[i].reg_rd_exist <= simple_IQ_queue[i+1].reg_rd_exist;
+                simple_IQ_queue[i].reg_rj_exist <= simple_IQ_queue[i+1].reg_rj_exist;
+                simple_IQ_queue[i].reg_rk_exist <= simple_IQ_queue[i+1].reg_rk_exist;
+                // 这里ready信号需要后面单独处理
+                simple_IQ_queue[i].pc <= simple_IQ_queue[i+1].pc;
+                simple_IQ_queue[i].fetch_start_pc <= simple_IQ_queue[i+1].fetch_start_pc;
+                simple_IQ_queue[i].pred_taken <= simple_IQ_queue[i+1].pred_taken;
+                simple_IQ_queue[i].pred_cut_pos <= simple_IQ_queue[i+1].pred_cut_pos;
+                simple_IQ_queue[i].instr_pos <= simple_IQ_queue[i+1].instr_pos;
+                simple_IQ_queue[i].pred_jump_pc <= simple_IQ_queue[i+1].pred_jump_pc;
+
+                // 这里单独处理ready信号
+                // 使用wakeup vec是因为其同时考虑了压缩和唤醒
+                simple_IQ_queue[i].rj_ready <= wakeup_rj_vec[i+1];
+                simple_IQ_queue[i].rk_ready <= wakeup_rk_vec[i+1];
+            end else begin
+                simple_IQ_queue[i].rj_ready <= wakeup_rj_vec[i];
+                simple_IQ_queue[i].rk_ready <= wakeup_rk_vec[i];
+            end
+        end
+    end
+
     
 end
 

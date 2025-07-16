@@ -33,11 +33,6 @@ module rename(
     // 但是这里是FU和发射队列决定的，这里只需要查看write back信号类型即可
     // 并且因为FU和发射队列可能会同时更新（尤其是一个周期完成的Simple_FU）
     // 所以还需要注意区分
-    input logic [3:0] IQ_busy_table_update_vec, // 表示busy table对应位要更新的值, 0表示值准备好，1表示值没准备好
-    input logic [`PREG_INDEX_WIDTH-1:0] IQ_busy_table_update_preg_index_vec [3:0], // 表示busy table对应位要更新的preg index
-    input logic [3:0] FU_busy_table_update_vec, // 表示busy table对应位要更新的值, 0表示值准备好，1表示值没准备好
-    input logic [`PREG_INDEX_WIDTH-1:0] FU_busy_table_update_preg_index_vec [3:0], // 表示busy table对应位要更新的preg index
-
     // freelist interface from ROB retires
     input logic retire_write_back_valid, // retire outputs are valid
     input logic [3:0] freed_preg_valid_vec, // at most 4 instr commit in one cycle
@@ -61,7 +56,7 @@ module rename(
     input logic [3:0] begin_exec_valid_vec,
     // IQ发射，置忙表对应位为1，表示开始计算
     input logic [`PREG_INDEX_WIDTH-1:0] wb_rd_index_vec [3:0],
-    input logic [3:0] wb_valid_vec,
+    input logic [3:0] wb_valid_vec
     // FU写回，置忙表对应位为0，表示计算完成
 );
 

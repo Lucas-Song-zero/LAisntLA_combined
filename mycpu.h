@@ -246,6 +246,9 @@ typedef struct packed {
     logic preg_rk_ready;                // rk物理寄存器 value ready
     logic [`PREG_INDEX_WIDTH-1:0] rd_history_preg;  // rd历史物理寄存器索引
     logic [31:0] pred_jump_target_pc; // 预测的跳转目标pc(针对这条指令来说的)
+    logic pred_taken; // 预测这条指令是否taken
+    logic [1:0] pred_cut_pos; // 预测的分支指令位置
+    logic [1:0] instr_pos; // 指令在取指块中的位置
     logic [1:0] issue_distr_direction; // 00 - simple_IQ ; 01 - complex_IQ ; 10 - LSU_IQ ; 11 - ROB
     logic store_or_load;                // 是否是store或load指令
     logic [1:0] bar_type;               // 屏障类型 00 - normal , 01 - DBAR , 10 - IBAR
@@ -287,19 +290,15 @@ typedef struct packed {
     logic [1:0] instr_pos;
 } SIMPLE_IQ_ENTRY_t;
 
-// DIV and MOD latency is 4 clk, so we need to delay 3 clks
-// therefore the counting-down bits is 3
-`define COUNTING_DOWN_BITS_WIDTH 4
+// DIV and MOD latency maybe need to set to 10 clk
 typedef struct packed {
     logic [`ROB_ENTRY_INDEX_WIDTH-1:0] rob_entry_index;
     logic [`PREG_INDEX_WIDTH-1:0] rj_index;
     logic rj_valid;
-    logic rj_counting_down_enable;
-    logic [`COUNTING_DOWN_BITS_WIDTH-1:0] rj_counting_down_bits; // 4bits for counting down (因为DIV和MOD的latency是4clk，所以需要4bits delay)
+    logic rj_ready;
     logic [`PREG_INDEX_WIDTH-1:0] rk_index;
     logic rk_valid;
-    logic rk_counting_down_enable;
-    logic [`COUNTING_DOWN_BITS_WIDTH-1:0] rk_counting_down_bits; // 3bits for counting down (因为DIV和MOD的latency是4clk，所以需要3bits来表示)
+    logic rk_ready;
     logic [`PREG_INDEX_WIDTH-1:0] rd_index;
     logic rd_valid;
     logic imm_enable;
@@ -385,11 +384,12 @@ typedef struct packed {
 
 // Complex Issue Queue 单条指令信息结构体
 typedef struct packed {
+    logic valid;
     logic [3:0] gen_op_type;
     logic [4:0] spec_op_type;
     logic [25:0] imm;
     logic imm_enable;
-    logic [`ROB_ENTRY_INDEX_WIDTH-1:0] rob_entry;
+    logic [`ROB_ENTRY_INDEX_WIDTH-1:0] rob_entry_index;
     logic [`PREG_INDEX_WIDTH-1:0] preg_rd;
     logic [`PREG_INDEX_WIDTH-1:0] preg_rj;
     logic [`PREG_INDEX_WIDTH-1:0] preg_rk;
@@ -575,3 +575,4 @@ typedef struct packed {
     logic [31:0] real_jump_pc;
     logic [2:0] BJ_type; // 0 表示普通分支指令, 1 表示B指令(相当于直接跳转) , 2 表示 BL (相当于JAL) , 3 表示 普通非调用间接跳转指令 , 4 表示 函数返回指令(JR $ra类似于)
 } BJ_jump_entry_t;
+

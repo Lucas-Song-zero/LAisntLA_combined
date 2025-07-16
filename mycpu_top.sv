@@ -163,17 +163,27 @@ IFU ifu(
 
     // 从icache那边读取回来的4条指令
     .fetched_instr_group(), // icache resp的一部分
-    .instr_out(fetched_instr) // 输出给decoder的指令
+    .fetched_entry_index_back(), // 从icache resp接受读取到的是哪一次的取指请求信息
+    .fetched_instr_valid(), // 表示icache取到指令了，写回是有效的
+    .instr_out(fetched_instr_out) // 输出给decoder的指令
 );
 // IFU 要连接到icache上
 
 
 // 这里可以放一个icache top实例
 logic ifu_valid; // ifu的最前面的指令需求取指回来了(valid=1)，可以输出给decoder
-logic [31:0] fetched_instr [3:0]; // 一次最多取四条指令
-logic [1:0] icache_resp_instr_num; // 一次取指的指令数量
-logic [3:0] fetch_valid; // 一次取指的指令四条中哪几条是有效的,应该一定是连续的1
-// fetch_valid 是由 cut_pos决定的，每次icache都会取4条指令回来
+logic [31:0] fetched_instr_out [3:0]; // 一次最多取四条指令
+// instr_valid 是由 cut_pos决定的，每次icache都会取4条指令回来
+logic [3:0] instr_valid;
+always_comb begin
+    instr_valid = 4'b0000;
+    case(cut_pos_ifu_out)
+        2'b00: instr_valid = 4'b1111;
+        2'b01: instr_valid = 4'b0001;
+        2'b10: instr_valid = 4'b0011;
+        2'b11: instr_valid = 4'b0111;
+    endcase
+end
 // icache_top ...
 
 // 然后是decoder
@@ -197,7 +207,7 @@ decoder_stage decoder(
     .instr_1(fetched_instr[1]),
     .instr_2(fetched_instr[2]),
     .instr_3(fetched_instr[3]),
-    .fetch_valid(fetch_valid),
+    .instr_valid(instr_valid),
     .decoder_ready(decoder_ready), // decoder_ready == rename_ready
 
     .start_pc_in(fetch_pc_ifu_out),
@@ -304,42 +314,384 @@ rename rename(
 );
 
 rename_output_t rename_output_vec [3:0];
-logic dispatch_ready;
 logic issue_ready;
 logic [`ROB_ENTRY_INDEX_WIDTH-1:0] rob_alloc_index_start;
 logic [2:0] rob_index_num_req_rename_out;
 logic [2:0] rename_rd_request_out;
 
 // 这里需要增加一个根据renamed之后的指令的 issue_direction 来每个IQ需要分配的空位数量的逻辑
+logic [2:0] total_simple_iq_input_instr_num;
 logic [2:0] simple_iq_0_input_instr_num;
 logic [2:0] simple_iq_1_input_instr_num;
 logic [2:0] complex_iq_input_instr_num;
 logic [2:0] lsu_iq_input_instr_num;
 // 如果可以会尽可能给一个IQ分配满4个指令，因为这样可以增加内部pre-wakeup的概率（大概可以）
 // 如果没有分配，则对应的 issue_valid也要置0
+assign total_simple_iq_input_instr_num = (
+    (rename_output_vec[0].issue_distr_direction == 2'b00) +
+    (rename_output_vec[1].issue_distr_direction == 2'b00) +
+    (rename_output_vec[2].issue_distr_direction == 2'b00) +
+    (rename_output_vec[3].issue_distr_direction == 2'b00)
+);
+assign complex_iq_input_instr_num = (
+    (rename_output_vec[0].issue_distr_direction == 2'b01) +
+    (rename_output_vec[1].issue_distr_direction == 2'b01) +
+    (rename_output_vec[2].issue_distr_direction == 2'b01) +
+    (rename_output_vec[3].issue_distr_direction == 2'b01)
+);
+assign lsu_iq_input_instr_num = (
+    (rename_output_vec[0].issue_distr_direction == 2'b10) +
+    (rename_output_vec[1].issue_distr_direction == 2'b10) +
+    (rename_output_vec[2].issue_distr_direction == 2'b10) +
+    (rename_output_vec[3].issue_distr_direction == 2'b10)
+);
+// 还要有每个iq input instr的mask
+logic [3:0] total_iq_input_instr_mask;
+logic [3:0] complex_iq_input_instr_mask;
+logic [3:0] lsu_iq_input_instr_mask;
+assign total_iq_input_instr_mask = {
+    (rename_output_vec[0].issue_distr_direction == 2'b00),
+    (rename_output_vec[1].issue_distr_direction == 2'b00),
+    (rename_output_vec[2].issue_distr_direction == 2'b00),
+    (rename_output_vec[3].issue_distr_direction == 2'b00)
+};
+assign complex_iq_input_instr_mask = {
+    (rename_output_vec[0].issue_distr_direction == 2'b01),
+    (rename_output_vec[1].issue_distr_direction == 2'b01),
+    (rename_output_vec[2].issue_distr_direction == 2'b01),
+    (rename_output_vec[3].issue_distr_direction == 2'b01)
+};
+assign lsu_iq_input_instr_mask = {
+    (rename_output_vec[0].issue_distr_direction == 2'b10),
+    (rename_output_vec[1].issue_distr_direction == 2'b10),
+    (rename_output_vec[2].issue_distr_direction == 2'b10),
+    (rename_output_vec[3].issue_distr_direction == 2'b10)
+};
 
 logic [2:0] simple_iq_0_left_entry_cnt;
 logic [2:0] simple_iq_1_left_entry_cnt;
 logic [2:0] complex_iq_left_entry_cnt;
 logic [2:0] lsu_iq_left_entry_cnt;
 
-// 以及要增加分配 alloc到的rob_entry_vec给每个IQ的逻辑
-logic [`ROB_ENTRY_INDEX_WIDTH-1:0] simple_iq_0_rob_entry_vec [3:0];
-logic [`ROB_ENTRY_INDEX_WIDTH-1:0] simple_iq_1_rob_entry_vec [3:0];
-logic [`ROB_ENTRY_INDEX_WIDTH-1:0] complex_iq_rob_entry_vec [3:0];
-logic [`ROB_ENTRY_INDEX_WIDTH-1:0] lsu_iq_rob_entry_vec [3:0];
+// 为了平衡两个simple IQ的entry数量，这里会定义一个每个周期flip的变量表示优先分配给哪个IQ
+logic simple_IQ_distr_flip;
+always_ff @(posedge aclk) begin
+    if(!rst_n) begin
+        simple_IQ_distr_flip <= 1'b0;
+    end else begin
+        simple_IQ_distr_flip <= ~simple_IQ_distr_flip;
+    end
+end
+// 结合上面的逻辑来分配IQ空位数量
+// 首先确定是否能分配
+// 这里能分配的条件是：
+// 1. 存在一个simple IQ中有空位
+assign issue_ready = (
+    ((simple_iq_0_left_entry_cnt >= total_simple_iq_input_instr_num) ||
+    (simple_iq_1_left_entry_cnt >= total_simple_iq_input_instr_num)) 
+    && (complex_iq_left_entry_cnt >= complex_iq_input_instr_num)
+    && (lsu_iq_left_entry_cnt >= lsu_iq_input_instr_num)
+);
+// 用于映射 rename_output 到各个 IQ 输入结构体的 task 定义
+// 映射到 Simple IQ 输入结构体
+task automatic map_rename_to_simple_iq(
+    input rename_output_t rename_output,
+    input logic [`ROB_ENTRY_INDEX_WIDTH-1:0] rob_entry_index,
+    input logic [31:0] fetch_start_pc,
+    // input logic pred_taken,
+    // input logic [1:0] pred_cut_pos,
+    // input logic [1:0] instr_pos,
+    output simple_single_instr_info_t result
+);
+    result = '0;
+    
+    result.valid = rename_output.valid;
+    result.rob_entry_index = rob_entry_index;
+    result.gen_op_type = rename_output.gen_op_type;
+    result.spec_op_type = rename_output.spec_op_type;
+    result.imm = rename_output.imm;
+    result.imm_enable = rename_output.imm_enable;
+    result.imm_sign_extend = rename_output.imm_sign_extend;
+    result.preg_rd = rename_output.preg_rd;
+    result.preg_rj = rename_output.preg_rj;
+    result.preg_rk = rename_output.preg_rk;
+    result.reg_rd_exist = rename_output.rd_exist;
+    result.reg_rj_exist = rename_output.rj_exist;
+    result.reg_rk_exist = rename_output.rk_exist;
+    result.rj_ready = rename_output.preg_rj_ready;
+    result.rk_ready = rename_output.preg_rk_ready;
+    result.pc = rename_output.pc;
+    result.fetch_start_pc = fetch_start_pc;
+    result.pred_taken = rename_output.pred_taken;
+    result.pred_cut_pos = rename_output.pred_cut_pos;
+    result.instr_pos = rename_output.instr_pos;
+    result.pred_jump_pc = rename_output.pred_jump_target_pc;
+endtask
+
+// 映射到 Complex IQ 输入结构体
+task automatic map_rename_to_complex_iq(
+    input rename_output_t rename_output,
+    input logic [`ROB_ENTRY_INDEX_WIDTH-1:0] rob_entry_index,
+    output complex_single_instr_info_t result
+);
+    result = '0;
+    
+    result.valid = rename_output.valid;
+    result.rob_entry_index = rob_entry_index;
+    result.gen_op_type = rename_output.gen_op_type;
+    result.spec_op_type = rename_output.spec_op_type;
+    result.imm = rename_output.imm;
+    result.imm_enable = rename_output.imm_enable;
+    result.rob_entry = rob_entry_index;
+    result.preg_rd = rename_output.preg_rd;
+    result.preg_rj = rename_output.preg_rj;
+    result.preg_rk = rename_output.preg_rk;
+    result.reg_rd_exist = rename_output.rd_exist;
+    result.reg_rj_exist = rename_output.rj_exist;
+    result.reg_rk_exist = rename_output.rk_exist;
+    result.rj_ready = rename_output.preg_rj_ready;
+    result.rk_ready = rename_output.preg_rk_ready;
+endtask
+
+// 映射到 LSU IQ 输入结构体
+task automatic map_rename_to_lsu_iq(
+    input rename_output_t rename_output,
+    input logic [`ROB_ENTRY_INDEX_WIDTH-1:0] rob_entry_index,
+    output lsu_single_instr_info_t result
+);
+    result = '0;
+    result.valid = rename_output.valid;
+    result.gen_op_type = rename_output.gen_op_type;
+    result.spec_op_type = rename_output.spec_op_type;
+    result.store_or_load = rename_output.store_or_load;
+    result.bar_type = rename_output.bar_type;
+    result.imm = rename_output.imm;
+    result.imm_enable = rename_output.imm_enable;
+    result.arch_rd_index = rename_output.rd_arch_index;
+    result.rob_entry = rob_entry_index;
+    result.preg_rd = rename_output.preg_rd;
+    result.preg_rj = rename_output.preg_rj;
+    result.preg_rk = rename_output.preg_rk;
+    result.reg_rd_exist = rename_output.rd_exist;
+    result.reg_rj_exist = rename_output.rj_exist;
+    result.reg_rk_exist = rename_output.rk_exist;
+    result.rj_ready = rename_output.preg_rj_ready;
+    result.rk_ready = rename_output.preg_rk_ready;
+    result.rd_ready = rename_output.preg_rd_ready;
+endtask
+
+// 通用的 pos_to_pos 映射 task
+// 根据 input_instr_mask 生成 pos_to_pos_map
+task automatic generate_pos_to_pos_map(
+    input logic [3:0] input_instr_mask,
+    output logic [1:0] pos_to_pos_map [3:0]
+);
+    pos_to_pos_map = '0;
+    case(input_instr_mask)
+        4'b0001: begin
+            pos_to_pos_map[0] = 2'd0;
+        end
+        4'b0010: begin
+            pos_to_pos_map[0] = 2'd1;
+        end
+        4'b0100: begin
+            pos_to_pos_map[0] = 2'd2;
+        end
+        4'b1000: begin
+            pos_to_pos_map[0] = 2'd3;
+        end
+        4'b0011: begin
+            pos_to_pos_map[0] = 2'd0;
+            pos_to_pos_map[1] = 2'd1;
+        end
+        4'b0101: begin
+            pos_to_pos_map[0] = 2'd0;
+            pos_to_pos_map[1] = 2'd2;
+        end
+        4'b0110: begin
+            pos_to_pos_map[0] = 2'd1;
+            pos_to_pos_map[1] = 2'd2;
+        end
+        4'b1001: begin
+            pos_to_pos_map[0] = 2'd0;
+            pos_to_pos_map[1] = 2'd3;
+        end
+        4'b1010: begin
+            pos_to_pos_map[0] = 2'd1;
+            pos_to_pos_map[1] = 2'd3;
+        end
+        4'b1100: begin
+            pos_to_pos_map[0] = 2'd2;
+            pos_to_pos_map[1] = 2'd3;
+        end
+        4'b1101: begin
+            pos_to_pos_map[0] = 2'd0;
+            pos_to_pos_map[1] = 2'd2;
+        end
+        4'b1110: begin
+            pos_to_pos_map[0] = 2'd1;
+            pos_to_pos_map[1] = 2'd2;
+        end
+        4'b1111: begin
+            pos_to_pos_map[0] = 2'd0;
+            pos_to_pos_map[1] = 2'd1;
+        end
+        default: begin
+            pos_to_pos_map = '0;
+        end
+    endcase
+endtask
+
+// 然后首先确定complex iq和lsu iq的分配，这两个直接分配就行，不涉及内部二分的问题
+// 为了尽可能减少代码的复杂度，这里会先由case进行 pos->pos的分配，后面再直接调用map函数
+logic [1:0] complex_iq_pos_to_pos_map [3:0];
+logic [1:0] lsu_iq_pos_to_pos_map [3:0];
+// Complex IQ 的 pos_to_pos 映射
+always_comb begin
+    generate_pos_to_pos_map(complex_iq_input_instr_mask, complex_iq_pos_to_pos_map);
+end
+// Complex IQ 的指令映射
+always_comb begin
+    complex_iq_instr_info = '0;
+    
+    for(int i=0; i<4; i=i+1) begin
+        if(i<complex_iq_input_instr_num) begin
+            map_rename_to_complex_iq(
+                rename_output_vec[complex_iq_pos_to_pos_map[i]],
+                rob_alloc_index_start + complex_iq_pos_to_pos_map[i],
+                complex_iq_instr_info[i]
+            );
+        end
+    end
+end
+// LSU IQ 的 pos_to_pos 映射
+always_comb begin
+    generate_pos_to_pos_map(lsu_iq_input_instr_mask, lsu_iq_pos_to_pos_map);
+end
+// LSU IQ 的指令映射
+always_comb begin
+    lsu_iq_instr_info = '0;
+    
+    for(int i=0; i<4; i=i+1) begin
+        if(i<lsu_iq_input_instr_num) begin
+            map_rename_to_lsu_iq(
+                rename_output_vec[lsu_iq_pos_to_pos_map[i]],
+                rob_alloc_index_start + lsu_iq_pos_to_pos_map[i],
+                lsu_iq_instr_info[i]
+            );
+        end
+    end
+end
+
+// 然后是simple IQ的分配，首先要考虑能否全部分配给一个simple IQ
+// 如果不行再考虑每个要分配多少个
+logic [1:0] simple_iq_0_pos_to_pos_map [3:0];
+logic [1:0] simple_iq_1_pos_to_pos_map [3:0]; 
+logic simple_iq_final_distr; // 0表示最终分配给0，1表示最终分配给1
+always_comb begin
+    simple_iq_0_pos_to_pos_map = '0;
+    simple_iq_1_pos_to_pos_map = '0;
+    if(!simple_IQ_distr_flip) begin // 优先给 simple iq 0 分配
+        for(int i=0; i<4; i=i+1) begin
+            if(i<total_simple_iq_input_instr_num) begin
+                map_rename_to_simple_iq(
+                    rename_output_vec[simple_iq_0_pos_to_pos_map[i]],
+                    rob_alloc_index_start + simple_iq_0_pos_to_pos_map[i],
+                    simple_iq_0_instr_info[i]
+                );
+            end else begin
+                map_rename_to_simple_iq(
+                    rename_output_vec[simple_iq_1_pos_to_pos_map[i]],
+                    rob_alloc_index_start + simple_iq_1_pos_to_pos_map[i],
+                    simple_iq_1_instr_info[i]
+                );
+            end
+        end
+    end else begin
+        for(int i=0; i<4; i=i+1) begin
+            if(i<total_simple_iq_input_instr_num) begin
+                map_rename_to_simple_iq(
+                    rename_output_vec[simple_iq_1_pos_to_pos_map[i]],
+                    rob_alloc_index_start + simple_iq_1_pos_to_pos_map[i],
+                    simple_iq_1_instr_info[i]
+                );
+            end else begin
+                map_rename_to_simple_iq(
+                    rename_output_vec[simple_iq_0_pos_to_pos_map[i]],
+                    rob_alloc_index_start + simple_iq_0_pos_to_pos_map[i],
+                    simple_iq_0_instr_info[i]
+                );
+            end
+        end
+    end
+end
+
+// 然后是simple IQ的指令映射
+always_comb begin
+    simple_iq_0_instr_info = '0;
+    simple_iq_1_instr_info = '0;
+
+    for(int i=0; i<4; i=i+1) begin
+        if(simple_iq_final_distr) begin // 最终分配给 IQ 0
+            map_rename_to_simple_iq(
+                rename_output_vec[simple_iq_0_pos_to_pos_map[i]],
+                rob_alloc_index_start + simple_iq_0_pos_to_pos_map[i],
+                simple_iq_0_instr_info[i]
+            );
+        end else begin // 最终分配给 IQ 1
+            map_rename_to_simple_iq(
+                rename_output_vec[simple_iq_1_pos_to_pos_map[i]],
+                rob_alloc_index_start + simple_iq_1_pos_to_pos_map[i],
+                simple_iq_1_instr_info[i]
+            );
+        end
+    end
+end
+
 
 // IQ输入输出的结构体
 // 输入
-simple_single_instr_info_t simple_iq_0_instr_info;
-simple_single_instr_info_t simple_iq_1_instr_info;
-complex_single_instr_info_t complex_iq_instr_info;
-lsu_single_instr_info_t lsu_iq_instr_info;
+simple_single_instr_info_t simple_iq_0_instr_info [3:0];
+simple_single_instr_info_t simple_iq_1_instr_info [3:0];
+complex_single_instr_info_t complex_iq_instr_info [3:0];
+lsu_single_instr_info_t lsu_iq_instr_info [3:0];
 // 输出
 simple_issue_queue_issued_info_t simple_iq_0_issued_info;
 simple_issue_queue_issued_info_t simple_iq_1_issued_info;
 complex_issue_queue_issued_info_t complex_iq_issued_info;
 lsu_issue_queue_issued_info_t lsu_iq_issued_info;
+
+// 和忙表的交互
+logic [3:0] begin_exec_valid_vec;
+assign begin_exec_valid_vec = {
+    simple_iq_0_issued_info.valid && simple_iq_0_issued_info.issued_reg_rd_exist,
+    simple_iq_1_issued_info.valid && simple_iq_1_issued_info.issued_reg_rd_exist,
+    complex_iq_issued_info.valid && complex_iq_issued_info.issued_reg_rd_exist,
+    lsu_iq_issued_info.valid && lsu_iq_issued_info.issued_reg_rd_exist
+};
+
+logic [`PREG_INDEX_WIDTH-1:0] begin_exec_preg_index_vec;
+assign begin_exec_preg_index_vec = {
+    simple_iq_0_issued_info.issued_preg_rd,
+    simple_iq_1_issued_info.issued_preg_rd,
+    complex_iq_issued_info.issued_preg_rd,
+    lsu_iq_issued_info.issued_preg_rd
+};
+
+logic [3:0] wb_valid_vec;
+assign wb_valid_vec = {
+    simple_fu_0_result_valid && simple_fu_0_preg_rd_exist,
+    simple_fu_1_result_valid && simple_fu_1_preg_rd_exist,
+    complex_fu_result_valid && complex_fu_preg_rd_exist,
+    lsu_fu_result_valid && lsu_fu_preg_rd_exist
+};
+logic [`PREG_INDEX_WIDTH-1:0] wb_rd_index_vec;
+assign wb_rd_index_vec = {
+    simple_fu_0_wb_rd_index,
+    simple_fu_1_wb_rd_index,
+    complex_fu_wb_rd_index,
+    lsu_wb_rd_index
+}
 
 simple_issue_queue simple_issue_queue_0(
     .clk(aclk),
@@ -351,7 +703,7 @@ simple_issue_queue simple_issue_queue_0(
     .issue_ready(simple_iq_0_ready),
     .issue_valid(simple_iq_0_issue_valid),
 
-    .instr_info(), // 输入指令信息结构体数组
+    .instr_info(simple_iq_0_instr_info), // 输入指令信息结构体数组
 
     .write_back_rd_exist_vec(),
     .write_back_rd_index(),
@@ -369,7 +721,7 @@ simple_issue_queue simple_issue_queue_1(
     .issue_ready(simple_iq_1_ready),
     .issue_valid(simple_iq_1_issue_valid),
 
-    .instr_info(), // 输入指令信息结构体数组
+    .instr_info(simple_iq_1_instr_info), // 输入指令信息结构体数组
 
     .write_back_rd_exist_vec(),
     .write_back_rd_index_vec(),
@@ -387,7 +739,7 @@ complex_issue_queue complex_issue_queue(
     .issue_ready(complex_iq_ready),
     .issue_valid(complex_iq_issue_valid),
 
-    .instr_info(), // 输入指令信息结构体数组
+    .instr_info(complex_iq_instr_info), // 输入指令信息结构体数组
 
     .write_back_rd_exist_vec(),
     .write_back_rd_index_vec(),
@@ -405,7 +757,7 @@ LSU_issue_queue LSU_issue_queue(
     .issue_ready(lsu_iq_ready),
     .issue_valid(lsu_iq_issue_valid),
 
-    .instr_info(), // 输入指令信息结构体数组
+    .instr_info(lsu_iq_instr_info), // 输入指令信息结构体数组
 
     .write_back_rd_exist_vec(),
     .write_back_rd_index_vec(),
@@ -438,7 +790,8 @@ simple_fu simple_fu_0(
     .pred_wrong(simple_fu_0_pred_wrong),
     .exception(simple_fu_0_exception),
     .result_valid(simple_fu_0_result_valid),
-    .wb_rob_entry_index(simple_fu_0_wb_rob_entry_index)
+    .wb_rob_entry_index(simple_fu_0_wb_rob_entry_index),
+    .preg_rd_exist(simple_fu_0_preg_rd_exist)
 );
 
 simple_fu simple_fu_1(
@@ -461,7 +814,8 @@ simple_fu simple_fu_1(
     .pred_wrong(simple_fu_1_pred_wrong),
     .exception(simple_fu_1_exception),
     .result_valid(simple_fu_1_result_valid),
-    .wb_rob_entry_index(simple_fu_1_wb_rob_entry_index)
+    .wb_rob_entry_index(simple_fu_1_wb_rob_entry_index),
+    .preg_rd_exist(simple_fu_1_preg_rd_exist)
 );
 
 complex_fu complex_fu(
@@ -480,7 +834,8 @@ complex_fu complex_fu(
     .result(complex_fu_result),
     .wb_rd_index(complex_fu_wb_rd_index),
     .wb_rob_entry_index(complex_fu_wb_rob_entry_index),
-    .result_valid(complex_fu_result_valid)
+    .result_valid(complex_fu_result_valid),
+    .preg_rd_exist(complex_fu_preg_rd_exist)
 );
 
 LSU lsu(
@@ -495,10 +850,13 @@ LSU lsu(
     .rj_val(lsu_fu_prf_readback_rj_val),
     .rk_val(lsu_fu_prf_readback_rk_val),
 
+
     .load_data(),
     .complete_rob_entry_index(),
     .complete_valid(),
     .exception(),
+    .wb_rd_valid(lsu_wb_preg_rd_valid),
+    .wb_preg_rd_index(lsu_wb_rd_index),
 
     // 这里应该还有一个dcache的有效信号
     .cache_req(),

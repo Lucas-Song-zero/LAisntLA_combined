@@ -22,7 +22,8 @@ module simple_fu(
     output logic pred_wrong,
     output logic [`ROB_MAINBODY_ENTRY_exception_width-1:0] exception,
     output logic result_valid,
-    output logic [`ROB_ENTRY_INDEX_WIDTH-1:0] wb_rob_entry_index // 写回ROB的寻址entry index
+    output logic [`ROB_ENTRY_INDEX_WIDTH-1:0] wb_rob_entry_index, // 写回ROB的寻址entry index
+    output logic preg_rd_exist
 );
 
 // after one cycle delay, pass the preg rd index to the output

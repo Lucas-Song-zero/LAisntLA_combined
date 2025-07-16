@@ -19,6 +19,8 @@ module LSU(
     // lsu output
     output logic [31:0] load_data,
     output logic [`ROB_ENTRY_INDEX_WIDTH-1:0] complete_rob_entry_index,
+    output logic wb_rd_valid,
+    output logic [`PREG_INDEX_WIDTH-1:0] wb_preg_rd_index,
     output logic complete_valid,
     output logic [`ROB_MAINBODY_ENTRY_exception_width-1:0] exception,
 
